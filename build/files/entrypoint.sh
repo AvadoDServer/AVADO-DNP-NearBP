@@ -1,0 +1,26 @@
+#!/bin/bash
+
+echo "network=$NETWORK"
+
+ls -lR /root/.near
+
+if [ ! -f /root/.near/config.json ]; then
+    NEARD_INIT="neard init --chain-id $NETWORK --download-genesis"
+    echo "No config found - initializing node: $NEARD_INIT"
+    $NEARD_INIT
+
+    echo "Downloading chain snapshot"
+    SNAPSHOT_URL="https://near-protocol-public.s3.ca-central-1.amazonaws.com/backups/$NETWORK/rpc/data.tar"
+    echo "$SNAPSHOT_URL"
+    mkdir -p /root/.near/data
+    cd /root/.near/data
+    wget -c $SNAPSHOT_URL
+    tar xf data.tar
+    rm data.tar
+
+    echo "Initialization complete."
+fi
+
+ls -lR /root/.near
+
+neard run
