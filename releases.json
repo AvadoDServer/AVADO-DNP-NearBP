@@ -1,9 +1,16 @@
 {
   "0.0.1": {
-    "hash": "/ipfs/QmXtgiDMh99FXgHsXnqmugoYy2oeSsjMaUxUAXEuqPsfTs",
+    "hash": "/ipfs/QmaPpbH8L4z6kBdX14xp7WALtwzt1EtiBwrTbjsb6WDioP",
     "type": "manifest",
     "uploadedTo": {
-      "http://80.208.229.228:5001": "Mon, 20 Dec 2021 16:08:27 GMT"
+      "http://80.208.229.228:5001": "Mon, 27 Dec 2021 14:02:03 GMT"
+    }
+  },
+  "0.0.2": {
+    "hash": "/ipfs/QmafXguFGWAcGT22uDDH5jYd8pRjQkqkWNvUrYiW1BMyBg",
+    "type": "manifest",
+    "uploadedTo": {
+      "http://80.208.229.228:5001": "Sat, 15 Jan 2022 00:41:17 GMT"
     }
   }
 }
