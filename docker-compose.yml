@@ -2,14 +2,14 @@ version: '3.4'
 services:
   nearbp.avado.dnp.dappnode.eth:
     build: ./build
-    image: 'nearbp.avado.dnp.dappnode.eth:0.0.1'
+    image: 'nearbp.avado.dnp.dappnode.eth:0.0.3'
     restart: always
     volumes:
       - 'data:/root/.near'
     ports:
-      - '24567'
+      - '24567:24567'
     environment:
       - EXTRA_OPTS=
-      - NETWORK=testnet
+      - NETWORK=mainnet
 volumes:
   data: {}

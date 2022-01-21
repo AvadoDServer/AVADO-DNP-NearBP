@@ -1,4 +1,4 @@
-FROM nearprotocol/nearcore:master-4425c94a810f9b169c27a9198e95a8b13afd35a2
+FROM nearprotocol/nearcore:1.23.1
 
 RUN apt-get update
 RUN apt-get install -y wget
