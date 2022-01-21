@@ -8,9 +8,9 @@
   "avatar": "/ipfs/QmYRmFCtdXvqq3drc6kBXxeWiiMatTfKVpVrmLX883cQbR",
   "author": "sponnet",
   "image": {
-    "path": "",
-    "hash": "",
-    "size": "",
+    "path": "nearbp.avado.dnp.dappnode.eth_0.0.3.tar.xz",
+    "hash": "/ipfs/QmYM85GKyGSpv3osbyN5EbsYhxvejYdzQ27uZbxF2SnQoV",
+    "size": 48956312,
     "ports": [
       "24567:24567"
     ],
@@ -23,5 +23,5 @@
     ]
   },
   "license": "GLP-3.0",
-  "builddate": "2022-01-21T17:53:45.413Z"
+  "builddate": "2022-01-21T18:10:38.016Z"
 }
