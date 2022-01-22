@@ -1,1 +1,9 @@
-{}
+{
+  "0.0.3": {
+    "hash": "/ipfs/QmPBFiNfPjDdEzMCcR8uXah6AhPbtKjQ5Ni2j8fxknKq9j",
+    "type": "manifest",
+    "uploadedTo": {
+      "http://80.208.229.228:5001": "Sat, 22 Jan 2022 21:13:34 GMT"
+    }
+  }
+}

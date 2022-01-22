@@ -5,12 +5,12 @@
   "description": "Near Validator (mainnet)",
   "autoupdate": true,
   "type": "service",
-  "avatar": "/ipfs/QmYRmFCtdXvqq3drc6kBXxeWiiMatTfKVpVrmLX883cQbR",
+  "avatar": "/ipfs/QmbY9evdxFB5q7Brn8ti3U8A9ThaVxg2KwfNAmgcEkAewz",
   "author": "sponnet",
   "image": {
-    "path": "",
-    "hash": "",
-    "size": 0,
+    "path": "nearbp.avado.dnp.dappnode.eth_0.0.3.tar.xz",
+    "hash": "/ipfs/QmPuS1WSiy8kZ7mQBTAzCNi5R2rEnE6wnJFd4Ubp3tzW1u",
+    "size": 49565524,
     "ports": [
       "24567:24567"
     ],
@@ -23,5 +23,5 @@
     ]
   },
   "license": "GLP-3.0",
-  "builddate": ""
+  "builddate": "2022-01-22T21:13:33.978Z"
 }
