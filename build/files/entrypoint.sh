@@ -16,9 +16,7 @@ if [ ! -f /root/.near/config.json ]; then
     echo "$SNAPSHOT_URL"
     mkdir -p /root/.near/data
     cd /root/.near/data
-    wget -c $SNAPSHOT_URL
-    tar xf data.tar
-    rm data.tar
+    wget -qO- $SNAPSHOT_URL | tar xv -
 
     echo "Initialization complete."
 fi
