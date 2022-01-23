@@ -1,5 +1,8 @@
 #!/bin/bash
 
+
+sleep 9999
+
 echo "network=$NETWORK"
 
 # Check if this node has been initialized already
