@@ -1,9 +1,6 @@
 #!/bin/bash
 
-
-sleep 9999
-
-echo "network=$NETWORK"
+echo "Starting NEAR node on network $NETWORK"
 
 # Check if this node has been initialized already
 if [ ! -f /root/.near/config.json ]; then
@@ -20,8 +17,8 @@ if [ ! -f /root/.near/config.json ]; then
     echo "Retrieving snapshot from $SNAPSHOT_URL"
     mkdir -p /root/.near/data
     cd /root/.near/data
-    wget -qO- $SNAPSHOT_URL | tar xv -
-    echo "Initialization complete."
+    wget -qO- $SNAPSHOT_URL | tar xv
+    echo "Download of snapshot complete."
 fi
 
 ls -l /root/.near
