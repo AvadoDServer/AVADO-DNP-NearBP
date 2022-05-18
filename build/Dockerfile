@@ -1,4 +1,4 @@
-FROM nearprotocol/nearcore:1.25.0
+FROM nearprotocol/nearcore:1.26.0
 
 RUN apt-get update
 RUN apt-get install -y wget
