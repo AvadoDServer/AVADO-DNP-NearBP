@@ -17,7 +17,8 @@
     ],
     "volumes": [
       "data:/root/.near"
-    ]
+    ],
+    "size": 48984896
   },
   "license": "GLP-3.0"
 }
