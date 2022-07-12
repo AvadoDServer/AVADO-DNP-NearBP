@@ -15,7 +15,7 @@ if [ ! -f /root/.near/config.json ]; then
     # Download a snapshot to sync faster
     echo "Downloading chain snapshot"
 
-    LATEST=`/app/s5cmd --no-sign-request=true cat s3://near-protocol-public/backups/$NETWORK/archive/latest`
+    LATEST=`/app/s5cmd --no-sign-request=true cat s3://near-protocol-public/backups/$NETWORK/rpc/latest`
     if [ -z "$LATEST" ]; then
         echo "ERROR: cannot find latest snapshot tag.. Waiting 1 hour to retry"
         date
@@ -23,7 +23,7 @@ if [ ! -f /root/.near/config.json ]; then
         exit
     fi
 
-    SNAPSHOT_BUCKET="s3://near-protocol-public/backups/$NETWORK/archive/$LATEST/*"
+    SNAPSHOT_BUCKET="s3://near-protocol-public/backups/$NETWORK/rpc/$LATEST/*"
     echo "Latest snapshot at: $SNAPSHOT_BUCKET"
 
     echo "Retrieving snapshot from $SNAPSHOT_BUCKET"
