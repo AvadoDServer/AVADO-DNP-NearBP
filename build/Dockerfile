@@ -13,4 +13,7 @@ RUN rm /app/*.gz
 COPY files/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
+# default config
+COPY files/config.json /root/.near/config.json.default
+
 ENTRYPOINT /app/entrypoint.sh
