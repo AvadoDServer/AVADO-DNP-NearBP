@@ -1,4 +1,4 @@
-FROM nearprotocol/nearcore:1.29.0
+FROM --platform=linux/amd64 nearprotocol/nearcore:1.29.1
 
 RUN apt-get update
 RUN apt-get install -y wget
@@ -14,6 +14,8 @@ COPY files/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # default config
-COPY files/config.json /root/.near/config.json.default
+COPY files/config.json /app/config.json.default
+
+# COPY files/config.json /root/.near/config.json.default
 
 ENTRYPOINT /app/entrypoint.sh
