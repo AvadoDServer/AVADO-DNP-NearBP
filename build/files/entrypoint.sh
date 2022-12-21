@@ -34,8 +34,9 @@ if [ ! -f /root/.near/config.json ]; then
 fi
 
 echo "Copying default config to node"
-cp /root/.near/config.json.default /root/.near/config.json
+cp /app/config.json.default /root/.near/config.json
 
+echo "List items in /root/.near"
 ls -l /root/.near
 
 neard run
