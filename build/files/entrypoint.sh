@@ -31,10 +31,11 @@ if [ ! -f /root/.near/config.json ]; then
     cd /root/.near/data
     /app/s5cmd --no-sign-request=true cp $SNAPSHOT_BUCKET .
     echo "Download of snapshot complete."
-fi
 
-echo "Copying default config to node"
-cp /app/config.json.default /root/.near/config.json
+    echo "Copying default config to node"
+    cp /app/config.json.default /root/.near/config.json
+
+fi
 
 echo "List items in /root/.near"
 ls -l /root/.near
