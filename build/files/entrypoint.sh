@@ -41,3 +41,5 @@ echo "List items in /root/.near"
 ls -l /root/.near
 
 neard run
+
+sleep 9999
