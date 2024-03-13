@@ -1,13 +1,14 @@
 {
   "name": "nearbp.avado.dnp.dappnode.eth",
-  "version": "0.0.40",
-  "upstream": "1.37.0",
+  "version": "0.0.42",
+  "upstream": "1.37.2",
   "description": "Near Validator (mainnet)",
   "autoupdate": true,
   "type": "service",
   "avatar": "/ipfs/QmbY9evdxFB5q7Brn8ti3U8A9ThaVxg2KwfNAmgcEkAewz",
   "author": "sponnet",
   "image": {
+    "privileged": true,
     "ports": [
       "24567:24567"
     ],

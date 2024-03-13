@@ -15,6 +15,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # default config
 COPY files/config.json /app/config.json.default
+COPY files/genesis.json /app/genesis.json
 
 # COPY files/config.json /root/.near/config.json.default
 
