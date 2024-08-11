@@ -158,9 +158,7 @@
       "sync_height_threshold": 1
     },
     "tracked_accounts": [],
-    "tracked_shards": [
-      0
-    ],
+    "tracked_shards": [0],
     "log_summary_style": "colored",
     "log_summary_period": {
       "secs": 10,
@@ -178,6 +176,7 @@
     },
     "trie_viewer_state_size_limit": 50000,
     "store": {
+      "load_mem_tries_for_tracked_shards": true,
       "path": null,
       "enable_statistics": false,
       "enable_statistics_export": true,
