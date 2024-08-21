@@ -158,7 +158,7 @@
       "sync_height_threshold": 1
     },
     "tracked_accounts": [],
-    "tracked_shards": [0],
+    "tracked_shards": [],
     "log_summary_style": "colored",
     "log_summary_period": {
       "secs": 10,
