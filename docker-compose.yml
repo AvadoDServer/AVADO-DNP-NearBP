@@ -2,7 +2,7 @@ version: '3.4'
 services:
   nearbp.avado.dnp.dappnode.eth:
     build: ./build
-    image: 'nearbp.avado.dnp.dappnode.eth:0.0.56'
+    image: 'nearbp.avado.dnp.dappnode.eth:0.0.57'
     restart: always
     privileged: true
     volumes:
