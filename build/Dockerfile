@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 nearprotocol/nearcore:2.5.2
+FROM --platform=linux/amd64 nearprotocol/nearcore:2.6.1
 
 RUN apt-get update
 RUN apt-get install -y wget
