@@ -1,7 +1,7 @@
 {
   "name": "nearbp.avado.dnp.dappnode.eth",
-  "version": "0.0.58",
-  "upstream": "2.6.1",
+  "version": "0.0.59",
+  "upstream": "2.6.5",
   "description": "Near Validator (mainnet)",
   "autoupdate": true,
   "type": "service",
@@ -9,16 +9,9 @@
   "author": "sponnet",
   "image": {
     "privileged": true,
-    "ports": [
-      "24567:24567"
-    ],
-    "environment": [
-      "EXTRA_OPTS=",
-      "NETWORK=mainnet"
-    ],
-    "volumes": [
-      "data:/root/.near"
-    ]
+    "ports": ["24567:24567"],
+    "environment": ["EXTRA_OPTS=", "NETWORK=mainnet"],
+    "volumes": ["data:/root/.near"]
   },
   "license": "GLP-3.0"
 }
