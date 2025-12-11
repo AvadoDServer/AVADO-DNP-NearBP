@@ -1,5 +1,5 @@
 # FROM --platform=linux/amd64 nearprotocol/nearcore:2.9.1
-FROM --platform=linux/amd64 nearprotocol/nearcore:70a87be
+FROM --platform=linux/amd64 nearprotocol/nearcore:latest
 
 RUN apt-get update
 RUN apt-get install -y wget
