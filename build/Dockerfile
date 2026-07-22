@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 nearprotocol/nearcore:2.12.0
+FROM --platform=linux/amd64 nearprotocol/nearcore:2.13.0
 #FROM --platform=linux/amd64 nearprotocol/nearcore:latest
 
 RUN apt-get update
