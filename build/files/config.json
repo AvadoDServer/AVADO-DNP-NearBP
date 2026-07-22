@@ -222,19 +222,6 @@
     }
   },
   "state_sync_enabled": true,
-  "state_sync": {
-    "sync": {
-      "ExternalStorage": {
-        "location": {
-          "GCS": {
-            "bucket": "fast-state-parts"
-          }
-        },
-        "num_concurrent_requests": 25,
-        "num_concurrent_requests_during_catchup": 5
-      }
-    }
-  },
   "transaction_pool_size_limit": 100000000,
   "gc_step_period": {
     "secs": 0,
