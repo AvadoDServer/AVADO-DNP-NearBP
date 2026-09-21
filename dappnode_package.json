@@ -1,7 +1,7 @@
 {
   "name": "nearbp.avado.dnp.dappnode.eth",
-  "version": "0.0.74",
-  "upstream": "2.13.0",
+  "version": "0.0.75",
+  "upstream": "2.13.4",
   "description": "Near Validator (mainnet)",
   "autoupdate": true,
   "type": "service",
