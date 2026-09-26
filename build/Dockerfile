@@ -12,4 +12,4 @@ RUN chmod +x /app/entrypoint.sh
 COPY files/config.json /app/config.json.default
 COPY files/genesis.json /app/genesis.json
 
-ENTRYPOINT /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
