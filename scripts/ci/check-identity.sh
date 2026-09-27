@@ -14,7 +14,10 @@
 # FROM (with a sha256 digest), and the compose image is <name>:<version>.
 # Version rules: the version never goes down, and it must go up when the
 # manifest changed. A held package (a `hold` file) is not released, so its
-# version may stay while other files change.
+# version may stay while other files change. A nearcore version lower than the
+# base's is shown as a warning: a box whose database a newer nearcore migrated
+# cannot run an older one. The gate never merges it on the bot's PR; a real
+# rollback is the owner's own pull request.
 set -euo pipefail
 
 BASE=${1:?usage: check-identity.sh <base-ref> [out-dir]}
@@ -121,6 +124,13 @@ if git -C "$ROOT" cat-file -e "$BASE:dappnode_package.json" 2>/dev/null; then
   other=$(diff <(jq -S '{restart: .image.restart, privileged: .image.privileged, autoupdate}' "$B") <(jq -S '{restart: .image.restart, privileged: .image.privileged, autoupdate}' "$H") | grep '^[<>]' | tr -s ' ' | tr '\n' ' ' || true)
   [ -z "$other" ] || check INFO container "restart/privileged/autoupdate changed: $other"
 
+  if git -C "$ROOT" show "$BASE:build/Dockerfile" >"$OUT/base-Dockerfile" 2>/dev/null; then
+    read -r base_from _ <<<"$(nearcore_from "$OUT/base-Dockerfile")"
+    if [ "$base_from" != - ] && [ "$from_version" != - ] && [ "$(semver_cmp "$from_version" "$base_from")" = -1 ]; then
+      check INFO nearcore-downgrade "nearcore goes DOWN from $base_from ($BASE) to $from_version: boxes whose database $base_from migrated cannot run it; the gate never merges this on the bot's PR"
+      echo "::warning::nearcore goes down from $base_from to $from_version"
+    fi
+  fi
   base_version=$(jq -r .version "$B")
   cmp=$(semver_cmp "$version" "$base_version")
   manifest_changed=$(diff <(jq -S 'del(.version)' "$B") <(jq -S 'del(.version)' "$H") | grep '^[<>]' | tr -s ' ' | tr '\n' ' ' | cut -c1-200 || true)

@@ -20,6 +20,9 @@
 # Passes when the candidate
 #   - kept validator_key.json and node_key.json byte for byte (sha256), and
 #     did not initialise the node again (no "initializing node", no new key),
+#   - runs as the validator: its RPC status names the account and public key
+#     of validator_key.json (a key file neard no longer reads would leave the
+#     box a plain node that silently loses its validator seat),
 #   - opened the database production wrote ("the database exists"; a database
 #     migration is shown as INFO: it is one-way, see the PR text),
 #   - continued the sync where production stopped: no new epoch sync, no data
@@ -60,6 +63,7 @@ docker image inspect "$CAND" >/dev/null 2>&1 || die "candidate image $CAND not f
 
 id="avado-upgrade-near-$$"
 VOL="$id-data"
+# shellcheck disable=SC2317 # run by the EXIT trap
 cleanup() {
   docker rm -f "$id-production" "$id-candidate" >/dev/null 2>&1
   docker volume rm "$VOL" >/dev/null 2>&1
@@ -138,6 +142,15 @@ phase() {
   local restarts stop_s="" code
   restarts=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)
   if [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ]; then
+    if [ "$label" = candidate ]; then
+      # Which validator the running neard says it is (read before the stop).
+      local try
+      for try in 1 2 3; do
+        docker exec "$c" sh -c 'wget -qO- -T 10 http://127.0.0.1:3030/status' >"$OUT/candidate-status.raw" 2>/dev/null &&
+          jq -e . "$OUT/candidate-status.raw" >"$OUT/candidate-status.json" 2>/dev/null && break
+        [ "$try" = 3 ] || sleep 10
+      done
+    fi
     local t0
     t0=$(date +%s)
     docker stop -t 180 "$c" >/dev/null 2>&1
@@ -219,6 +232,20 @@ done
 [ "$(fact genesis.json "$before")" = "$(fact genesis.json "$after")" ] ||
   check INFO genesis.json "genesis.json changed after the update (before $(fact genesis.json "$before" | cut -c1-16), after $(fact genesis.json "$after" | cut -c1-16))"
 check INFO data "data/ before the update: $(fact data "$before"); after: $(fact data "$after")"
+
+# The validator key must be in use, not only on disk.
+key_json=$(docker run --rm --platform linux/amd64 --entrypoint cat -v "$VOL:/v" "$CAND" /v/validator_key.json 2>/dev/null || true)
+want_account=$(printf '%s' "$key_json" | jq -r '.account_id // empty' 2>/dev/null || true)
+want_key=$(printf '%s' "$key_json" | jq -r '.public_key // empty' 2>/dev/null || true)
+got_account=$(jq -r '.validator_account_id // empty' "$OUT/candidate-status.json" 2>/dev/null || true)
+got_key=$(jq -r '.validator_public_key // empty' "$OUT/candidate-status.json" 2>/dev/null || true)
+if [ ! -s "$OUT/candidate-status.json" ]; then
+  check FAIL validator-loaded "the candidate's RPC did not answer /status, so it could not be checked that neard uses validator_key.json"
+elif [ -n "$want_account" ] && [ "$got_account" = "$want_account" ] && [ -n "$want_key" ] && [ "$got_key" = "$want_key" ]; then
+  check PASS validator-loaded "the candidate's neard runs as validator $got_account with the public key of validator_key.json (${got_key:0:24}...)"
+else
+  check FAIL validator-loaded "the candidate's neard does not use validator_key.json: RPC status says validator ${got_account:-none} ${got_key:-(no key)}, the file has ${want_account:-?} ${want_key:-?} (a box would run as a plain node and lose its validator seat)"
+fi
 
 reinit=$(cand | grep -E 'initializing node|using key for account|generated .* genesis file' | head -2 | cut -c1-160 | tr '\n' ' ')
 if [ -z "$reinit" ]; then

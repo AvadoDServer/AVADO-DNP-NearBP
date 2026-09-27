@@ -20,14 +20,16 @@ name: PR checks
 #   upgrade   a box upgrades in place: the production image runs on a
 #             volume (with a validator key) until it is within 2 epochs of
 #             the head like a synced box, then this build starts on the
-#             same volume: keys byte for byte, database kept, sync goes on
-#             without a new epoch sync or data reset                    scripts/ci/upgrade-test.sh
+#             same volume: keys byte for byte and loaded (the RPC names the
+#             validator), database kept, sync goes on without a new epoch
+#             sync or data reset                                        scripts/ci/upgrade-test.sh
 # boot and upgrade run side by side (a fresh NEAR node can wait long for an
 # epoch sync proof). A boot or upgrade test that fails only on the public
 # network is tried once more on the spot.
 # When every job passed, the tested build's record is kept as artifact
-# avado-build-nearbp-<content id> (scripts/ci/content-id.sh); release.yml
-# publishes exactly that build after the merge, and nothing else.
+# avado-build-nearbp-<content id> (scripts/ci/content-id.sh), and only then
+# does avado/checks turn green; release.yml publishes exactly that build after
+# the merge, and nothing else.
 #
 # No secrets are used. Started by hand (workflow_dispatch), input "pr" is a PR
 # number of THIS repo (the bump bot uses this when it has no PAT_TOKEN), or
@@ -301,12 +303,50 @@ jobs:
       statuses: write
       actions: write # starts the gate after a run the bump bot started
     steps:
+      - id: verdict
+        name: Verdict of the checks
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+          BOOT: ${{ needs.boot.result }}
+          UPGRADE: ${{ needs.upgrade.result }}
+        run: |
+          if [ "$PLAN" = success ] && [ "$BUILD" = success ] && [ "$BOOT" = success ] && [ "$UPGRADE" = success ]; then
+            echo "state=success" >>"$GITHUB_OUTPUT"
+          else
+            echo "state=failure" >>"$GITHUB_OUTPUT"
+          fi
+      # The tested build's record is kept BEFORE avado/checks turns green: the
+      # gate merges on green, and release.yml publishes only a build it finds.
+      - id: download
+        name: Download the tested build's record
+        if: steps.verdict.outputs.state == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+      - id: keep
+        name: Keep the tested build's record (release.yml publishes exactly this build)
+        if: steps.verdict.outputs.state == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: avado-build-nearbp-${{ needs.build.outputs.content }}
+          path: |
+            ${{ runner.temp }}/build/record.json
+            ${{ runner.temp }}/build/releases.json
+            ${{ runner.temp }}/build/manifest.json
+          retention-days: 90
+          if-no-files-found: error
+          overwrite: true # a re-run of this job after a failed upload
       - id: status
         name: Status avado/checks
+        if: ${{ !cancelled() }} # also after a failed step above: the commit must not stay "pending"
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.plan.outputs.sha || github.event.pull_request.head.sha }}
           INPUT_PR: ${{ inputs.pr }}
+          VERDICT: ${{ steps.verdict.outputs.state }}
+          KEPT: ${{ steps.keep.outcome }}
           PLAN: ${{ needs.plan.result }}
           BUILD: ${{ needs.build.result }}
           BOOT: ${{ needs.boot.result }}
@@ -314,8 +354,10 @@ jobs:
         run: |
           # Even when the plan job failed before it knew the commit, the PR gets a status.
           case "$INPUT_PR" in '' | *[!0-9]*) ;; *) [ -n "$SHA" ] || SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR" --jq .head.sha || true) ;; esac
-          if [ "$PLAN" = success ] && [ "$BUILD" = success ] && [ "$BOOT" = success ] && [ "$UPGRADE" = success ]; then
+          if [ "$VERDICT" = success ] && [ "$KEPT" = success ]; then
             state=success desc="All checks passed: build, version, config, boot on mainnet, upgrade in place"
+          elif [ "$VERDICT" = success ]; then
+            state=failure desc="All checks passed, but the tested build's record could not be kept (re-run this job)"
           else
             state=failure desc="Failed: plan $PLAN, build $BUILD, boot $BOOT, upgrade $UPGRADE (open the run for details)"
           fi
@@ -326,29 +368,13 @@ jobs:
               -f description="$desc" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null ||
               echo "::warning::could not set the avado/checks status (read-only token on a pull request from a fork)"
           fi
-      - name: Download the tested build's record
-        if: steps.status.outputs.state == 'success'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: build
-          path: ${{ runner.temp }}/build
-      - name: Keep the tested build's record (release.yml publishes exactly this build)
-        if: steps.status.outputs.state == 'success'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: avado-build-nearbp-${{ needs.build.outputs.content }}
-          path: |
-            ${{ runner.temp }}/build/record.json
-            ${{ runner.temp }}/build/releases.json
-            ${{ runner.temp }}/build/manifest.json
-          retention-days: 90
-          if-no-files-found: error
       - name: Start the gate
         # A run started with the built-in token (the bump bot without PAT_TOKEN
         # uses workflow_dispatch) does not trigger gate.yml's workflow_run.
-        if: github.event_name == 'workflow_dispatch'
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run gate.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" || echo "::warning::could not start the gate; it runs within 4 hours anyway"
       - name: Result
+        if: ${{ !cancelled() }}
         run: '[ "${{ steps.status.outputs.state }}" = success ]'
