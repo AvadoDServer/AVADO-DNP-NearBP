@@ -249,4 +249,5 @@ there pretend to be on an older nearcore (for example 2.13.3 with its digest):
 the robot then offers 2.13.4, a CODE_RED security release. Run "Bump nearcore"
 by hand with a `version` to simulate a release without an image; the checks
 then fail, which exercises the issue path. Set `PIPELINE_MODE=off` there
-afterwards.
+afterwards. The first copy is `flisko/nearbp-pipeline-dryrun` (private,
+paused: `PIPELINE_MODE=off`, bump and gate disabled).
