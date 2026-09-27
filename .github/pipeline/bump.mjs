@@ -8,11 +8,14 @@
 //   docker-compose.yml      image: '<name>:<new package version>'
 // Required releases (CODE_RED_MAINNET, PROTOCOL_UPGRADE or SECURITY_UPGRADE)
 // get an issue for the owner at once, with the deadline ("[required]"); the
-// gate fast-tracks them. A release whose header cannot be read gets a
-// "[check]" issue. While the owner holds the package (a `hold` file on the
-// default branch) nothing is bumped; a required release is still reported.
-// A version whose PR the owner closed without merging is skipped: the bot
-// waits for a newer release (reopening the PR undoes the skip).
+// gate fast-tracks them. When the offered version's own header cannot be read,
+// the gate does not merge and asks the owner; an unreadable header on a
+// release the bump only covers gets a "[check]" issue. While the owner holds
+// the package (a `hold` file on the default branch) nothing is bumped; a
+// required release is still reported. A version whose PR the owner closed
+// without merging is skipped: the bot waits for a newer release (reopening
+// the PR undoes the skip); a required one stays on the owner's list (the gate
+// keeps its "[required]" issue open until production has it).
 //
 // Environment:
 //   GITHUB_REPOSITORY, GITHUB_TOKEN   this repo; reads, and the fallback for writes
@@ -114,9 +117,13 @@ function renderBody({ target, from, release, pkg, to, sum, list, pretendNote, ch
     ? `\n> **Required upgrade** (${sum.mandatory.map((c) => `${c.tag}: ${c.reasons.join(', ')}`).join('; ')}). **Deadline: ${deadlineText(sum.deadline)}**${sum.deadlineNote ? ` (${sum.deadlineNote})` : ''}. The gate merges this PR as soon as our checks are green (no 72 h wait), and the owner got a "[required]" issue with the deadline. Production is still the owner's click in editstore.\n`
     : '';
   const oneWay = oneWayNote(sum.oneWay, { fromNearcore: from, fromPackage: pkg.version });
-  const unknown = sum.unknown.length
-    ? `\n> **Release header not readable** for ${sum.unknown.map((c) => c.tag).join(', ')}: treated as a normal release (72 h wait). If NEAR says it is urgent, merge this PR by hand once \`avado/checks\` is green.\n`
-    : '';
+  const targetUnknown = sum.unknown.some((c) => c.tag === target);
+  const coveredUnknown = sum.unknown.filter((c) => c.tag !== target);
+  const unknown = (targetUnknown
+    ? `\n> **The release header of nearcore ${target} could not be read**, so the gate cannot tell whether it is meant for mainnet or required: **it does not merge this PR by itself**, and the owner gets an issue. Read the release notes; if it is a mainnet release, merge this PR by hand with "Create a merge commit" once \`avado/checks\` is green; if not, close it (the bot then skips ${target}).\n`
+    : '') + (coveredUnknown.length
+    ? `\n> **Release header not readable** for ${coveredUnknown.map((c) => c.tag).join(', ')} (included in this update): treated as a normal release. If NEAR says it is urgent, merge this PR by hand once \`avado/checks\` is green.\n`
+    : '');
   return `${marker}
 ## nearcore ${target} for NEAR
 ${pretendNote || ''}
@@ -129,10 +136,10 @@ ${required}${unknown}${oneWay ? `\n${oneWay}\n` : ''}
 ${headers ? `### Release headers\n${headers}\n` : ''}
 ### What happens next (nothing to do unless you get an email)
 1. **Checks** (\`avado/checks\`): the package is built with the AVADOSDK (files added to AVADO's IPFS node), the neard inside is exactly nearcore ${target}, neard accepts every key of our config.json and every flag the entrypoint passes, the name, volume, port and settings are compared with main and production, the package **boots on NEAR mainnet** (the epoch sync proof is accepted, it finds peers and header sync moves), and a box **upgrades in place** from the production version (validator_key.json and node_key.json stay byte for byte the same, the database is kept).${checksNote || ''}
-2. **Gate** (\`avado/gate\`, every 4 hours and after the checks): ${sum.mandatory.length ? 'this is a **required** release: it merges as soon as the checks are green.' : `a normal release: it merges when the checks are green and 72 hours have passed since nearcore published it${mergeAt ? ` (${mergeAt})` : ''}.`} If our checks fail or anything is unclear, it does **not** merge and opens an issue assigned to the owner with a ready-to-paste Claude Code prompt.
+2. **Gate** (\`avado/gate\`, every 4 hours and after the checks): ${targetUnknown ? '**the release header cannot be read: the gate does not merge; the owner decides.**' : sum.mandatory.length ? 'this is a **required** release: it merges as soon as the checks are green.' : `a normal release: it merges when the checks are green and 72 hours have passed since nearcore published it${mergeAt ? ` (${mergeAt})` : ''}.`} If our checks fail or anything is unclear, it does **not** merge and opens an issue assigned to the owner with a ready-to-paste Claude Code prompt.
 3. **Release**: after the merge, the package is published to the **staging** store, from exactly the build the checks tested. Production stays a manual click in editstore.
 
-Pushing a fix to \`${BOT_BRANCH}\` is fine: the bot keeps your commits (a fix that touches \`.github/\`, \`scripts/\` or \`hold\` is left for the owner to merge). **Closing this PR without merging skips nearcore ${target}**: the bot waits for a newer release (reopen the PR to undo). To pause the bot, set the repository variable \`PIPELINE_MODE\` to \`off\` (see README).
+Pushing a fix to \`${BOT_BRANCH}\` is fine: the bot keeps your commits (a fix that touches \`.github/\`, \`scripts/\` or \`hold\` is left for the owner to merge). **Closing this PR without merging skips nearcore ${target}**: the bot waits for a newer release (reopen the PR to undo)${sum.mandatory.length ? '; as this release is required, its "[required]" issue stays open until production has it' : ''}. To pause the bot, set the repository variable \`PIPELINE_MODE\` to \`off\` (see README).
 `;
 }
 
@@ -205,7 +212,9 @@ async function main() {
     pr: number || null,
     deadline: sum.deadline,
     deadlineNote: sum.deadlineNote,
-    why: sum.unknown.map((c) => `nearcore ${c.tag}: ${c.headerWhy}`).join('; ') || null,
+    // A "[check]" issue only for releases the bump covers but does not offer;
+    // an unreadable header on the target itself stops the gate (its own issue).
+    why: sum.unknown.filter((c) => c.tag !== target).map((c) => `nearcore ${c.tag}: ${c.headerWhy}`).join('; ') || null,
     mandatory: sum.mandatory.map((c) => ({ tag: c.tag, reasons: c.reasons, protocol: c.protocol })),
     items: list.map((c) => ({ tag: c.tag, url: c.url, header: c.header, mandatory: c.mandatory, reasons: c.reasons })),
     oneWay: oneWayNote(sum.oneWay, { fromNearcore: mainNear, fromPackage: pkg.version }) || null,

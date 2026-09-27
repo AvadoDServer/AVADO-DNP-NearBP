@@ -8,18 +8,22 @@
 // set by this repo's PR-checks workflow) are green on the PR head, the branch
 // contains the current default branch, no person changed the checks or the
 // pipeline on the branch, the package is not held, the target is a published
-// nearcore MAINNET release, and
+// nearcore MAINNET release whose header could be read, nearcore goes up, and
 //   - the release is REQUIRED (its header says CODE_RED_MAINNET,
 //     PROTOCOL_UPGRADE: TRUE or SECURITY_UPGRADE: TRUE, for the target or a
 //     release it covers): at once, no waiting; or
 //   - any other release: 72 hours after nearcore published the target.
-// Never merge when our checks failed or anything is unclear: then an issue
-// assigned to the owner explains it and carries a ready-to-paste Claude Code
-// prompt. A check that failed only on something outside our package (the
-// AVADOSDK build, the boot or upgrade test on the public network, a runner
-// step) is run once more first (GitHub "re-run failed jobs"), without an email.
+// Never merge when our checks failed or anything is unclear (among others: a
+// target whose release header cannot be read, a nearcore downgrade): then an
+// issue assigned to the owner explains it and carries a ready-to-paste Claude
+// Code prompt. A check that failed only on something outside our package (the
+// AVADOSDK build, the boot or upgrade test on the public network, keeping the
+// tested build's record, a runner step) is run once more first (GitHub
+// "re-run failed jobs"), without an email. A bot-only branch that conflicts
+// with the default branch waits: the bump bot rebuilds it.
 // The "[required]" issues (lib/near.js) are moved along on every run: merged,
-// on staging (promote it), closed once production has it.
+// on staging (promote it), PR closed (skipped), reminders as the deadline
+// nears, closed once production has it.
 //
 // Environment:
 //   GITHUB_REPOSITORY, GITHUB_TOKEN   this repo (contents, pull requests, issues,
@@ -38,8 +42,8 @@ import { makeClient } from './lib/gh.js';
 import { upsertIssue, closeIssue, findIssue, listOpenIssues } from './lib/issue.js';
 import { releaseKind, covered as coveredReleases, summarize, deadlineText, oneWayNote, syncNotices } from './lib/near.js';
 import {
-  BOT_EMAIL, BOT_BRANCH, UPSTREAM_REPO, PR_CHECKS_PATH, DOCKERFILE, bare, stableReleases, readNearcore, packageAt, holdReason,
-  releasedVersions, readProduction, git, fetchBranch, retry, isTransient, env, hoursBetween, fmtUtc, recordFailure,
+  BOT_EMAIL, BOT_BRANCH, UPSTREAM_REPO, DOCKERFILE, bare, stableReleases, readNearcore, packageAt, holdReason, compareVersions,
+  checksRunProblem, releasedVersions, readProduction, git, fetchBranch, retry, isTransient, env, hoursBetween, fmtUtc, recordFailure,
 } from './lib/common.js';
 
 export const CHECKS_CONTEXT = 'avado/checks';
@@ -52,25 +56,39 @@ export const ALLOWED_BOT_FILES = /^(build\/Dockerfile|dappnode_package\.json|doc
 // record) is merged only by the owner, after reading it.
 export const OWNER_MERGE_FILES = /^(\.github\/|scripts\/|hold$|releases\.json$)/;
 // Steps whose failure is usually outside our package (public network, IPFS
-// node, production store, Docker Hub, the runner): they are re-run once.
-export const RETRYABLE_STEPS = /^(AVADOSDK build|Boots on NEAR mainnet|Upgrades a box in place|Production image|Download the tested image|Throwaway IPFS node|nearcore image digest|Free disk space|Set up job|Run actions\/|Post Run actions\/|Complete job)/;
+// node, production store, Docker Hub, the runner, GitHub's artifact store):
+// they are re-run once.
+export const RETRYABLE_STEPS = /^(AVADOSDK build|Boots on NEAR mainnet|Upgrades a box in place|Production image|Download the tested image|Download the tested build's record|Keep the tested build's record|Throwaway IPFS node|nearcore image digest|Free disk space|Set up job|Run actions\/|Post Run actions\/|Complete job)/;
 
 // The rules, as a pure function (tested in test/pipeline.test.mjs).
 //   checks: 'success' | 'failure' | 'error' | 'pending' | 'missing'
-//   release: { publishedAt, mainnet, why } of the target, or null when nearcore has no such release
+//   release: { publishedAt, mainnet, unknown, why } of the target, or null when nearcore has no such release
+//   nearcore: { main, pr } the nearcore versions on the default branch and on the PR
 //   mandatory: set when the target or a release it covers is required
+//   botOnly: only the bump bot committed on the PR (it rebuilds such a branch by itself)
 //   rerun: a re-run of checks that failed on an outside cause was just started
 //   held: the hold reason when the default branch holds the package
-export function decide({ checks, release, mandatory, now, upToDate, conflict, errors = [], unexpectedFiles = [], ownerFiles = [], rerun = null, waitHours = 72, headAt = null, silentHours = 6, held = null }) {
+export function decide({ checks, release, nearcore = null, mandatory, now, upToDate, conflict, botOnly = false, errors = [], unexpectedFiles = [], ownerFiles = [], rerun = null, waitHours = 72, headAt = null, silentHours = 6, held = null }) {
   if (errors.length) return { action: 'block', cause: 'unclear', why: `could not read everything needed: ${errors.join('; ')}` };
   if (held) return { action: 'wait', cause: 'held', why: `NEAR is held by the owner (${held}); nothing is merged until the hold file is removed` };
+  // Never down: a box whose database a newer nearcore migrated cannot run an
+  // older one. The bump bot writes the newest release back (or closes the PR)
+  // on its next run; a bot-only branch only gets here when the default branch
+  // moved past it, which needs no email.
+  const move = nearcore ? compareVersions(nearcore.pr, nearcore.main) : 1;
+  if (move < 0 && !botOnly) return { action: 'block', cause: 'downgrade', why: `a commit on the PR moves nearcore DOWN, from ${nearcore.main} on the default branch to ${nearcore.pr}; the gate never merges a downgrade` };
+  if (move <= 0) return { action: 'wait', cause: 'same', why: `the default branch already has nearcore ${nearcore.main}${move < 0 ? `, newer than this PR's ${nearcore.pr}` : ''}; the bump bot updates or closes this PR on its next run` };
   if (unexpectedFiles.length) return { action: 'block', cause: 'unexpected-files', why: `bot commits change files a bump never touches: ${unexpectedFiles.join(', ')}` };
   if (ownerFiles.length) return { action: 'block', cause: 'owner-merge', why: `a person changed files the gate never merges by itself (${ownerFiles.slice(0, 5).join(', ')}${ownerFiles.length > 5 ? ', ...' : ''}); the owner reviews and merges this PR` };
+  if (conflict && botOnly) return { action: 'wait', cause: 'behind', why: 'the PR conflicts with the default branch; the bump bot rebuilds its branch on the default branch on its next run' };
   if (conflict) return { action: 'block', cause: 'conflict', why: 'the PR conflicts with the default branch' };
   if (rerun) return { action: 'wait', cause: 'rerun', why: `our checks failed on something outside our package (${rerun}); they are being run once more` };
   if (checks === 'failure' || checks === 'error') return { action: 'block', cause: 'checks-failed', why: 'our checks failed' };
   if (!release?.publishedAt) return { action: 'block', cause: 'unclear', why: 'there is no published nearcore release for this version' };
   if (!release.mainnet) return { action: 'block', cause: 'unclear', why: `this nearcore version is not a mainnet release (${release.why})` };
+  // Without a readable header the gate cannot tell a mainnet release from a
+  // testnet-only one, or a required release from a normal one: the owner decides.
+  if (release.unknown) return { action: 'block', cause: 'header', why: `the release header of this nearcore version could not be read (${release.why}), so the gate cannot tell whether it is meant for mainnet or whether it is required; the owner decides` };
   if (checks !== 'success') {
     // Checks that never report must not make the gate wait silently forever.
     const waited = headAt ? hoursBetween(headAt, now) : 0;
@@ -90,6 +108,23 @@ export function ownerMergeFiles(files, botOnly) {
   return botOnly ? [] : files.filter((f) => OWNER_MERGE_FILES.test(f));
 }
 
+// The failed jobs of a checks run, from the API's job list: { name, url, id,
+// steps }. The "avado/checks" job only sums up the others and fails its last
+// step ("Result") whenever one of them failed; it counts only when an earlier
+// step of its own failed (keeping the tested build's record).
+export function failedJobList(apiJobs) {
+  const out = [];
+  for (const j of (apiJobs || []).filter((x) => x.conclusion === 'failure')) {
+    let steps = (j.steps || []).filter((s) => s.conclusion === 'failure').map((s) => s.name);
+    if (j.name === CHECKS_CONTEXT) {
+      steps = steps.filter((s) => s !== 'Result');
+      if (!steps.length) continue;
+    }
+    out.push({ name: j.name, url: j.html_url, id: j.id, steps });
+  }
+  return out;
+}
+
 // Did every failed job of a checks run fail only on outside steps? (A job lost
 // without a failed step, for example a runner that went away, counts as outside.)
 export function retryable(jobs) {
@@ -102,8 +137,9 @@ export function retryable(jobs) {
 // --- reading --------------------------------------------------------------------
 
 // The "avado/checks" status on the PR head, accepted only from this repo's
-// PR-checks workflow (a run in this repo, not a fork, for this commit).
-async function checksState(gh, repo, sha) {
+// PR-checks workflow (a run in this repo, not a fork, for this commit; a run
+// started by hand only on the default branch: lib/common.js checksRunProblem).
+async function checksState(gh, repo, sha, base) {
   const statuses = await gh.paginate(`repos/${repo}/commits/${sha}/statuses`, { maxPages: 3 });
   const mine = statuses.filter((s) => s.context === CHECKS_CONTEXT && s.creator?.login === 'github-actions[bot]');
   const latest = mine.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))[0];
@@ -116,9 +152,8 @@ async function checksState(gh, repo, sha) {
   } catch (err) {
     return { state: 'missing', note: `the linked run ${runId} could not be read (${err.message.slice(0, 80)})` };
   }
-  if (run.path !== PR_CHECKS_PATH || !run.head_repository || run.head_repository.id !== run.repository?.id) {
-    return { state: 'missing', note: `the status comes from ${run.path || 'an unknown workflow'}${run.head_repository?.id !== run.repository?.id ? ' in a fork' : ''}, not from this repo's PR checks` };
-  }
+  const problem = checksRunProblem(run, base);
+  if (problem) return { state: 'missing', note: `the status does not count: ${problem}` };
   if (run.event === 'pull_request' && run.head_sha !== sha) return { state: 'missing', note: `the linked run checked ${run.head_sha.slice(0, 7)}` };
   let state = latest.state;
   // A run that is running again (a re-run) counts as running, whatever it said before.
@@ -151,9 +186,8 @@ async function failedJobs(gh, repo, runId, { logs = true } = {}) {
   if (!runId) return { runId: null, jobs: [] };
   const data = await gh.get(`repos/${repo}/actions/runs/${runId}/jobs?per_page=100`);
   const jobs = [];
-  // "avado/checks" only sums up the others.
-  for (const j of (data?.jobs || []).filter((x) => x.conclusion === 'failure' && x.name !== CHECKS_CONTEXT)) {
-    const steps = (j.steps || []).filter((s) => s.conclusion === 'failure').map((s) => s.name);
+  for (const j of failedJobList(data?.jobs)) {
+    const { steps } = j;
     const step = steps.join('", "') || null;
     let excerpt = '';
     if (logs) {
@@ -163,7 +197,7 @@ async function failedJobs(gh, repo, runId, { logs = true } = {}) {
         excerpt = `(log not readable: ${err.message})`;
       }
     }
-    jobs.push({ name: j.name, url: j.html_url, step, steps, excerpt });
+    jobs.push({ name: j.name, url: j.url, step, steps, excerpt });
   }
   return { runId, jobs };
 }
@@ -188,7 +222,7 @@ async function reconcileRelease(gh, repo, base, root, main, say) {
 
 // --- the issue text ------------------------------------------------------------------
 
-function issueText({ repo, pr, target, mainNear, decision, checks, failed, runUrl, summary, now }) {
+export function issueText({ repo, pr, target, mainNear, decision, checks, failed, runUrl, summary, now }) {
   const server = env('GITHUB_SERVER_URL', 'https://github.com');
   const prUrl = `${server}/${repo}/pull/${pr.number}`;
   const required = summary?.mandatory?.length
@@ -199,6 +233,8 @@ function issueText({ repo, pr, target, mainNear, decision, checks, failed, runUr
     'owner-merge': 'a person changed the checks or the pipeline on the PR: please review and merge',
     conflict: 'the PR conflicts with main',
     'unexpected-files': 'the bump PR changes unexpected files',
+    header: 'its release header could not be read, you decide',
+    downgrade: 'a commit on the PR moves nearcore down',
     unclear: 'the gate could not decide',
   }[decision.cause] || decision.why;
   const title = `[needs fix] nearcore ${target}${required ? ' (REQUIRED)' : ''}: ${headline}`;
@@ -228,7 +264,7 @@ function issueText({ repo, pr, target, mainNear, decision, checks, failed, runUr
     prompt = `In the AVADO-DNP-NearBP repository (${repo}), pull request #${pr.number} on branch ${BOT_BRANCH} moves NEAR from nearcore ${mainNear} to nearcore ${target}.${required ? ` ${required}.` : ''} Its checks failed:
 ${failed.jobs.map((j) => `- ${j.name}${j.step ? `, step "${j.step}"` : ''}: ${j.url}`).join('\n') || `- see ${checks.url}`}
 Download the logs with: gh run download ${failed.runId || '<run id>'} -R ${repo}
-First decide whether the cause is outside our package: NEAR peers that did not answer the epoch sync request in time, too few peers on a GitHub runner, AVADO's IPFS node, bo.ava.do, Docker Hub or the runner itself. If so, do not change any files: run \`gh run rerun ${failed.runId || '<run id>'} -R ${repo} --failed\` and tell me.
+First decide whether the cause is outside our package: NEAR peers that did not answer the epoch sync request in time, too few peers on a GitHub runner, AVADO's IPFS node, bo.ava.do, Docker Hub, GitHub's artifact storage or the runner itself. If so, do not change any files: run \`gh run rerun ${failed.runId || '<run id>'} -R ${repo} --failed\` and tell me.
 Otherwise find why the check fails with nearcore ${target} (read the release notes of nearcore ${target} and every release since ${mainNear}: https://github.com/${UPSTREAM_REPO}/releases) and fix it on this branch.
 ${rules}`;
   } else if (decision.cause === 'owner-merge') {
@@ -237,6 +273,19 @@ ${rules}`;
 **What to do:** open ${prUrl}, read the changes to those files, and if they are right, merge it yourself with **"Create a merge commit"** (the release then publishes it to staging as usual). If not, remove those commits from the branch.`;
     prompt = `In ${repo}, pull request #${pr.number} (branch ${BOT_BRANCH}, nearcore ${mainNear} → ${target}) has commits by people that change: ${decision.why}.
 Show me those changes (gh pr diff ${pr.number} -R ${repo}) and explain in plain words what each one does and whether it weakens a check or changes what boxes run. Do not change any files and do not merge.`;
+  } else if (decision.cause === 'header') {
+    const notes = `https://github.com/${UPSTREAM_REPO}/releases/tag/${target}`;
+    what = `The header at the top of the nearcore ${target} release notes (CODE_COLOR, PROTOCOL_UPGRADE, ...) could not be read. It is how the pipeline tells a mainnet release from a testnet-only one, and a required release from a normal one, so the gate does not merge this PR by itself. Nothing was merged or released; boxes are not affected.
+${required ? `\n**${required}.**\n` : ''}
+**What to do:** read the release notes (${notes}), or let Claude Code read them with the prompt below.
+- **Meant for NEAR mainnet:** when \`avado/checks\` is green, merge ${prUrl} yourself with **"Create a merge commit"**. The release then publishes it to staging; promote it in editstore (before the date NEAR gives, if any).
+- **Not meant for mainnet:** close ${prUrl} without merging. The bump bot then skips nearcore ${target} and waits for the next release.`;
+    prompt = `In the AVADO-DNP-NearBP repository (${repo}), the bump PR #${pr.number} moves NEAR from nearcore ${mainNear} to ${target}, but the pipeline could not read the header at the top of the nearcore ${target} release notes. Read ${notes} and tell me in plain words: is it meant for NEAR mainnet validators; is it required (critical fix, protocol upgrade or security fix) and by which date; does it migrate the database (one-way); and does build/files/config.json or build/files/entrypoint.sh need a change for it. If NEAR changed its header format for good, also show me the change .github/pipeline/lib/near.js would need (lib/mandatory.js is a copy of the release watcher's rules in AvadoDServer/avado-release-control: they are fixed there first). Do not change any files and do not merge.`;
+  } else if (decision.cause === 'downgrade') {
+    what = `A commit on the PR moves NEAR from nearcore ${mainNear} (the default branch) down to ${target}, for example a merge conflict resolved with the old FROM line in build/Dockerfile. A box whose database a newer nearcore migrated cannot run an older one (it would crash-loop), so the gate never merges a downgrade. Nothing was merged or released; boxes are not affected.
+
+**What happens next:** the bump bot writes the newest nearcore back into build/Dockerfile, the manifest and the compose file on its next run (within 4 hours) and keeps the other commits; the checks run again and this issue closes by itself. Nothing to do, unless the older version was meant: a real rollback (only if NEAR asks for one, and never across a database migration) is a pull request of your own that you merge yourself.`;
+    prompt = `In ${repo}, pull request #${pr.number} (branch ${BOT_BRANCH}) has a commit by a person that moves nearcore from ${mainNear} down to ${target}. Show me which commit did it (gh pr view ${pr.number} -R ${repo} --json commits; git log -p -- build/Dockerfile) and explain in plain words why. Do not change any files and do not merge.`;
   } else if (decision.cause === 'conflict') {
     what = 'The PR cannot be merged because it conflicts with the default branch, and it has commits by people, so the bot does not rebuild it.';
     prompt = `In ${repo}, pull request #${pr.number} (branch ${BOT_BRANCH}) conflicts with main. Check it out (gh pr checkout ${pr.number} -R ${repo}), merge main into it, resolve the conflicts keeping nearcore ${target}, its image digest in build/Dockerfile and the bot's package version, and push.
@@ -329,7 +378,7 @@ async function main() {
     errors.push(`${DOCKERFILE} on the PR: ${err.message}`);
   }
   const mainNear = pkg.nearcore;
-  const checks = await checksState(gh, repo, sha);
+  const checks = await checksState(gh, repo, sha, base);
   const cmp = await gh.get(`repos/${repo}/compare/${encodeURIComponent(base)}...${sha}`);
   const upToDate = cmp.behind_by === 0;
   const conflict = full.mergeable === false && full.mergeable_state === 'dirty';
@@ -348,7 +397,7 @@ async function main() {
   const stable = stableReleases(rels || []);
   const rel = stable.find((r) => bare(r.tag_name) === target) || null;
   const kind = rel ? releaseKind(rel) : null;
-  const release = rel ? { publishedAt: rel.published_at, mainnet: kind.mainnet, why: kind.why } : null;
+  const release = rel ? { publishedAt: rel.published_at, mainnet: kind.mainnet, unknown: kind.unknown, why: kind.why } : null;
   const list = rels && target !== '?' ? coveredReleases(rels, mainNear, target) : [];
   const summary = summarize(list);
   const mandatory = summary.mandatory.length
@@ -370,7 +419,8 @@ async function main() {
   }
 
   const decision = decide({
-    checks: checks.state, release, mandatory, now, upToDate, conflict, errors, unexpectedFiles, ownerFiles, rerun, waitHours, headAt, held: main.hold,
+    checks: checks.state, release, nearcore: target !== '?' ? { main: mainNear, pr: target } : null, mandatory, now, upToDate, conflict, botOnly,
+    errors, unexpectedFiles, ownerFiles, rerun, waitHours, headAt, held: main.hold,
   });
 
   const requiredText = mandatory ? `yes: ${mandatory.source}; deadline ${deadlineText(summary.deadline, now)}` : 'no';
@@ -379,7 +429,9 @@ async function main() {
   say(`- our checks: ${checks.state}${checks.url ? ` (${checks.url})` : ''}${checks.note ? ` (${checks.note})` : ''}`);
   say(`- nearcore ${target} released: ${release ? `${fmtUtc(release.publishedAt)}${release.mainnet ? '' : ` (NOT a mainnet release: ${release.why})`}` : 'no such release'}`);
   say(`- required upgrade: ${requiredText}`);
-  if (summary.unknown.length) say(`- release header not readable: ${summary.unknown.map((c) => c.tag).join(', ')} (treated as normal releases)`);
+  if (release?.unknown) say(`- release header of nearcore ${target} not readable (${release.why}): the owner decides`);
+  const unreadable = summary.unknown.filter((c) => c.tag !== target);
+  if (unreadable.length) say(`- release header not readable for ${unreadable.map((c) => c.tag).join(', ')} (releases this PR also covers; treated as normal releases)`);
   if (summary.oneWay.length) say(`- one-way step: ${summary.oneWay.map((c) => c.tag).join(', ')}`);
   say(`- branch contains ${base}: ${upToDate ? 'yes' : 'no'}${conflict ? ' (conflict)' : ''}`);
   if (main.hold) say(`- HELD: ${main.hold}`);
@@ -390,7 +442,9 @@ async function main() {
   const statusState = { merge: 'success', wait: 'pending', block: 'failure' }[decision.action];
   const statusText = !merging && decision.action === 'merge' ? `shadow mode, would merge: ${decision.why}` : decision.why;
   await gh.post(`repos/${repo}/statuses/${sha}`, { state: statusState, context: GATE_CONTEXT, description: statusText.slice(0, 139), target_url: runUrl });
-  const mergeRule = mandatory
+  const mergeRule = release?.unknown
+    ? 'release header not readable: never by itself, the owner decides'
+    : mandatory
     ? 'required release: as soon as our checks are green'
     : release ? `normal release: not before ${fmtUtc(new Date(release.publishedAt).getTime() + waitHours * 3600000)} (${waitHours} h after the nearcore release)` : '—';
   const table = `${GATE_COMMENT}

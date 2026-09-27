@@ -167,6 +167,25 @@ export function contentId(root, rev = 'HEAD') {
   return execFileSync(join(root, 'scripts/ci/content-id.sh'), [rev], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
+// Does a workflow run count as this repo's PR checks (gate.mjs: its green
+// status; release.mjs: its tested build)? null when it does, else why not.
+// A run started by hand (workflow_dispatch) uses the copy of pr-checks.yml on
+// the branch it was started on, so only runs started on the default branch
+// count: the bump bot and the README ("PR checks" with pr = main) start them
+// there. A pull_request run uses the PR's own copy; people's changes to the
+// checks on the bot's branch are the owner's to merge (gate.mjs).
+export function checksRunProblem(run, base) {
+  if (!run) return 'the run could not be read';
+  if (run.path !== PR_CHECKS_PATH) return `it comes from ${run.path || 'an unknown workflow'}, not from this repo's PR checks`;
+  if (!run.head_repository || run.head_repository.id !== run.repository?.id) return 'it ran for a fork';
+  if (run.event === 'workflow_dispatch') {
+    if (!base || run.head_branch !== base) return `it was started by hand on branch ${run.head_branch || '?'}, not on ${base || 'the default branch'} (such a run uses that branch's copy of the checks)`;
+    return null;
+  }
+  if (run.event !== 'pull_request') return `it was started by ${run.event}`;
+  return null;
+}
+
 // Retries a read (or an idempotent call) that failed for a reason that may go
 // away: network errors, timeouts, HTTP 5xx and 429. Anything else fails at once.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

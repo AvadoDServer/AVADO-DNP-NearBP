@@ -6,14 +6,14 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import { decide, logExcerpt, ownerMergeFiles, retryable, ALLOWED_BOT_FILES } from '../gate.mjs';
+import { decide, issueText, logExcerpt, ownerMergeFiles, retryable, failedJobList, ALLOWED_BOT_FILES } from '../gate.mjs';
 import { stripBuild } from '../release.mjs';
 import {
-  releaseKind, mainnetReleases, classify, covered, summarize, oneWayNote, noticeText, noticeData, syncNotices, deadlineText,
+  releaseKind, mainnetReleases, classify, covered, summarize, oneWayNote, noticeText, noticeData, syncNotices, deadlineText, deadlineStage,
 } from '../lib/near.js';
 import {
   compareVersions, bumpPatch, maxVersion, stableReleases, readNearcore, setNearcore, setManifestFields, readComposeImage,
-  setComposeImage, bumpMarker, markerTarget, holdReason, contentId,
+  setComposeImage, bumpMarker, markerTarget, holdReason, contentId, checksRunProblem,
 } from '../lib/common.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -143,6 +143,66 @@ test('anything unclear blocks: no release, not a mainnet release, read errors, c
   assert.equal(decide({ ...base, unexpectedFiles: ['build/files/config.json'] }).cause, 'unexpected-files');
 });
 
+test('an unreadable release header on the offered version never merges: the owner decides', () => {
+  const unknown = { publishedAt: released, mainnet: true, unknown: true, why: 'the release has no readable header' };
+  for (const extra of [{}, { now: at(500) }, { mandatory: { source: 'nearcore 2.13.4: CODE_RED_MAINNET' } }, { checks: 'pending' }]) {
+    const d = decide({ ...base, release: unknown, ...extra });
+    assert.equal(d.action, 'block', JSON.stringify(extra));
+    assert.equal(d.cause, 'header');
+  }
+  assert.equal(decide({ ...base, release: unknown, checks: 'failure' }).cause, 'checks-failed', 'a failed check is still reported as such');
+  assert.equal(decide({ ...base, now: at(72) }).action, 'merge', 'a readable header still merges');
+});
+
+test('nearcore never goes down: a person\'s downgrade blocks, a bot branch that main overtook waits', () => {
+  const down = decide({ ...base, nearcore: { main: '2.13.4', pr: '2.13.3' }, now: at(500) });
+  assert.equal(down.action, 'block');
+  assert.equal(down.cause, 'downgrade');
+  assert.match(down.why, /from 2\.13\.4 .* to 2\.13\.3/);
+  const overtaken = decide({ ...base, nearcore: { main: '2.13.4', pr: '2.13.3' }, botOnly: true, now: at(500) });
+  assert.equal(overtaken.action, 'wait', 'main moved past a bot-only PR: the bump bot closes or updates it, no email');
+  assert.equal(decide({ ...base, nearcore: { main: '2.13.4', pr: '2.13.4' }, now: at(500) }).action, 'wait', 'no nearcore change: never merged');
+  assert.equal(decide({ ...base, nearcore: { main: '2.13.3', pr: '2.13.4' }, now: at(72) }).action, 'merge');
+});
+
+test('a conflict on a bot-only PR waits for the bump bot; people\'s commits need the owner', () => {
+  const bot = decide({ ...base, conflict: true, botOnly: true, upToDate: false });
+  assert.equal(bot.action, 'wait');
+  assert.equal(bot.cause, 'behind');
+  const people = decide({ ...base, conflict: true, botOnly: false, upToDate: false });
+  assert.equal(people.action, 'block');
+  assert.equal(people.cause, 'conflict');
+});
+
+test('only this repo\'s PR checks count, and a run started by hand only on the default branch', () => {
+  const repo = { id: 1 };
+  const run = (x) => ({ path: '.github/workflows/pr-checks.yml', repository: repo, head_repository: repo, event: 'pull_request', head_branch: 'avado-bot/bump', ...x });
+  assert.equal(checksRunProblem(run(), 'main'), null, 'a pull_request run');
+  assert.equal(checksRunProblem(run({ event: 'workflow_dispatch', head_branch: 'main' }), 'main'), null, 'started by hand on main (bump bot, README)');
+  assert.match(checksRunProblem(run({ event: 'workflow_dispatch', head_branch: 'try-new-checks' }), 'main'), /branch try-new-checks, not on main/);
+  assert.match(checksRunProblem(run({ event: 'push', head_branch: 'x' }), 'main'), /started by push/);
+  assert.match(checksRunProblem(run({ head_repository: { id: 2 } }), 'main'), /fork/);
+  assert.match(checksRunProblem(run({ path: '.github/workflows/other.yml' }), 'main'), /not from this repo's PR checks/);
+  assert.match(checksRunProblem(null, 'main'), /could not be read/);
+});
+
+test('the gate\'s issue says what to do for an unreadable header, a downgrade and a conflict', () => {
+  const args = (release, extra) => {
+    const decision = decide({ ...base, release, ...extra });
+    return issueText({ repo: 'o/r', pr: { number: 7 }, target: '2.13.5', mainNear: '2.13.4', decision, checks: { state: 'success' }, failed: { jobs: [] }, runUrl: 'run', summary: summarize([]), now: at(1) });
+  };
+  const h = args({ publishedAt: released, mainnet: true, unknown: true, why: 'the release has no readable header' });
+  assert.equal(h.title, '[needs fix] nearcore 2.13.5: its release header could not be read, you decide');
+  assert.match(h.body, /Meant for NEAR mainnet:.*merge https:\/\/github\.com\/o\/r\/pull\/7 yourself/);
+  assert.match(h.body, /Not meant for mainnet:.*close/);
+  assert.match(h.body, /releases\/tag\/2\.13\.5/);
+  const d = args(base.release, { nearcore: { main: '2.13.4', pr: '2.13.3' } });
+  assert.match(d.title, /moves nearcore down/);
+  assert.match(d.body, /bump bot writes the newest nearcore back/);
+  const c = args(base.release, { conflict: true });
+  assert.match(c.body, /has commits by people/);
+});
+
 test('a hold stops the gate without an issue', () => {
   const d = decide({ ...base, mandatory: { source: 'x' }, held: 'waiting for the DB migration test on the test box' });
   assert.equal(d.action, 'wait');
@@ -177,6 +237,13 @@ test('checks that failed on an outside step run once more, without an issue', ()
   assert.ok(!retryable([{ name: 'Plan (unit tests, digest, identity)', step: 'Identity (name, volume, port, env keys, versions)' }]));
   assert.ok(!retryable([{ name: 'Boot on NEAR mainnet', step: 'Load the tested image' }]), 'a tested image that does not match is not an outside problem');
   assert.ok(!retryable([]));
+  // The summing-up job: only a failure to keep the tested build's record counts (and is retried).
+  const apiJob = (name, failed) => ({ name, id: 1, html_url: 'u', conclusion: 'failure', steps: failed.map((n) => ({ name: n, conclusion: 'failure' })) });
+  assert.deepEqual(failedJobList([apiJob('avado/checks', ['Result']), apiJob('Boot on NEAR mainnet', ['Boots on NEAR mainnet'])]).map((j) => j.name), ['Boot on NEAR mainnet']);
+  const keep = failedJobList([apiJob('avado/checks', ["Keep the tested build's record (release.yml publishes exactly this build)", 'Result'])]);
+  assert.deepEqual(keep.map((j) => j.steps), [["Keep the tested build's record (release.yml publishes exactly this build)"]]);
+  assert.ok(retryable(keep), 'a failed artifact upload is retried once');
+  assert.ok(retryable(failedJobList([apiJob('avado/checks', ["Download the tested build's record"])])));
   const d = decide({ ...base, checks: 'failure', rerun: 'Boot on NEAR mainnet: Boots on NEAR mainnet' });
   assert.equal(d.action, 'wait');
   assert.equal(d.cause, 'rerun');
@@ -286,13 +353,14 @@ test('the release compares the uploaded manifest without what the AVADOSDK adds'
 });
 
 // --- the owner's "[required]" issues ------------------------------------------------------------
-function fakeGitHub(issues) {
+function fakeGitHub(issues, closedPrs = []) {
   const calls = [];
   let next = 100;
   const gh = {
     calls,
     async get(path) {
       if (/\/issues\?state=(open|all)/.test(path)) return issues.filter((i) => path.includes('state=all') || i.state === 'open');
+      if (/\/pulls\?state=closed&head=o:avado-bot%2Fbump/.test(path)) return closedPrs;
       throw new Error(`unexpected GET ${path}`);
     },
     async post(path, body) {
@@ -330,41 +398,109 @@ test('the "[required]" issue carries its facts and a deadline in the title', () 
   assert.match(noticeText({ ...d, kind: 'header', why: 'nearcore 2.13.4: the release has no readable header' }, { phase: 'pr', repo: 'o/r', mode: 'on', pr: 7 }).title, /^\[check\]/);
 });
 
+// Five days before the 2.13.4 deadline (2026-09-10 15:03 UTC): no reminder yet.
+const early = new Date('2026-09-05T12:00:00Z');
+const emails = (gh, from = 0) => gh.calls.slice(from).filter(([m, p]) => m === 'POST' && /comments$/.test(p)).map(([, , b]) => b.body);
+
 test('the "[required]" issue moves along: staging, then closed when production has it', async () => {
   const issues = [issueFor(1, required('2.13.4'), 'pr')];
   const gh = fakeGitHub(issues);
   const main = { upstream: '2.13.4', version: '0.0.77', released: true, hold: null };
-  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.3' });
+  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.3', now: early });
   assert.match(issues[0].body, /avado-pipeline:state staging@2\.13\.4/);
   assert.ok(gh.calls.some(([m, p, b]) => m === 'POST' && /comments$/.test(p) && /on STAGING now/.test(b.body)), 'one comment (one email) for the new phase');
   const before = gh.calls.length;
-  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.3' });
-  assert.ok(!gh.calls.slice(before).some(([m, p]) => m === 'POST' && /comments$/.test(p)), 'no new email while nothing changes');
-  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.4' });
+  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.3', now: early });
+  assert.equal(emails(gh, before).length, 0, 'no new email while nothing changes');
+  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.4', now: early });
   assert.equal(issues[0].state, 'closed');
 });
 
-test('the "[required]" issue closes when a newer bump replaces it or the PR was closed; stays while held', async () => {
+test('a required release reminds the owner 48 h and 12 h before its deadline and when it passes', async () => {
+  const deadline = '2026-09-10T15:03:23.000Z';
+  const h = (x) => new Date(new Date(deadline).getTime() + x * 3600000);
+  assert.equal(deadlineStage(deadline, h(-49)), '');
+  assert.equal(deadlineStage(deadline, h(-48)), '48h');
+  assert.equal(deadlineStage(deadline, h(-12)), '12h');
+  assert.equal(deadlineStage(deadline, h(0.1)), 'passed');
+  assert.equal(deadlineStage(null, h(10)), '', 'no date: no reminders');
+  const issues = [issueFor(1, required('2.13.4', deadline), 'staging')];
+  const gh = fakeGitHub(issues);
+  const main = { upstream: '2.13.4', version: '0.0.77', released: true, hold: null };
+  const run = (now) => syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.3', now });
+  let n = gh.calls.length;
+  await run(h(-60));
+  assert.equal(emails(gh, n).length, 0, 'more than 48 h left: nothing new');
+  n = gh.calls.length;
+  await run(h(-47));
+  assert.deepEqual(emails(gh, n).length, 1);
+  assert.match(emails(gh, n)[0], /less than 48 hours.*promote it to production in editstore now/);
+  n = gh.calls.length;
+  await run(h(-40));
+  await run(h(-13));
+  assert.equal(emails(gh, n).length, 0, 'one reminder per step, not per run');
+  n = gh.calls.length;
+  await run(h(-11));
+  assert.match(emails(gh, n).join('\n'), /less than 12 hours/);
+  n = gh.calls.length;
+  await run(h(1));
+  assert.match(emails(gh, n).join('\n'), /deadline for nearcore 2\.13\.4 has PASSED/);
+  assert.match(issues[0].body, /avado-pipeline:state staging-passed@2\.13\.4/);
+  n = gh.calls.length;
+  await run(h(30));
+  assert.equal(emails(gh, n).length, 0);
+  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.4', now: h(31) });
+  assert.equal(issues[0].state, 'closed', 'closes when production has it');
+  // An issue waiting for the Docker image keeps waiting, reminders or not.
+  const img = [issueFor(2, required('2.13.4', deadline), 'image-48h')];
+  await syncNotices({ gh: fakeGitHub(img), repo: 'o/r', owner: 'flisko', mode: 'on', main: { ...main, upstream: '2.13.3' }, pr: null, prodUpstream: '2.13.3', now: h(-47) });
+  assert.equal(img[0].state, 'open');
+});
+
+test('the "[required]" issue closes when a newer bump replaces it; stays while held, and when its PR was closed', async () => {
   const issues = [issueFor(1, required('2.13.4'), 'pr'), issueFor(2, required('2.13.2'), 'pr'), issueFor(3, required('2.13.3'), 'held')];
   const gh = fakeGitHub(issues);
   const main = { upstream: '2.13.1', version: '0.0.76', released: true, hold: null };
-  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: { number: 9, target: '2.13.5' }, prodUpstream: '2.13.1' });
+  await syncNotices({ gh, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: { number: 9, target: '2.13.5' }, prodUpstream: '2.13.1', now: early });
   assert.equal(issues[0].state, 'closed', 'replaced by the PR for 2.13.5');
-  const gh2 = fakeGitHub([issueFor(4, required('2.13.4'), 'pr')]);
-  await syncNotices({ gh: gh2, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1' });
-  assert.ok(gh2.calls.some(([m, p, b]) => m === 'PATCH' && b.state === 'closed'), 'no PR any more: the owner skipped it');
+  // The owner closed the required release's PR: it stays on the list, with one email.
+  const skippedPr = { number: 7, merged_at: null, body: `${bumpMarker('2.13.4')}\n## nearcore 2.13.4` };
+  const closedList = [{ number: 5, merged_at: '2026-09-01T00:00:00Z', body: bumpMarker('2.13.4') }, skippedPr];
+  const kept = [issueFor(4, required('2.13.4'), 'pr')];
+  const gh2 = fakeGitHub(kept, closedList);
+  await syncNotices({ gh: gh2, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', now: early });
+  assert.equal(kept[0].state, 'open', 'a required release is not dropped because its PR was closed');
+  assert.match(kept[0].body, /avado-pipeline:state skipped@2\.13\.4/);
+  assert.match(kept[0].body, /was closed without merging.*Production still does not have this required release/s);
+  assert.equal(emails(gh2).length, 1);
+  assert.match(emails(gh2)[0], /PR #7 for the REQUIRED nearcore 2\.13\.4 was closed without merging/);
+  const n = gh2.calls.length;
+  await syncNotices({ gh: gh2, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', now: early });
+  assert.equal(emails(gh2, n).length, 0, 'no second email while nothing changes');
+  await syncNotices({ gh: gh2, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: { number: 7, target: '2.13.4' }, prodUpstream: '2.13.1', now: early });
+  assert.match(kept[0].body, /avado-pipeline:state pr@2\.13\.4/, 'reopened PR: back to the PR phase');
+  // A "[check]" issue of a skipped version just closes.
+  const check = [issueFor(10, { ...required('2.13.4'), kind: 'header', why: 'nearcore 2.13.2: no header' }, 'pr')];
+  await syncNotices({ gh: fakeGitHub(check, closedList), repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', now: early });
+  assert.equal(check[0].state, 'closed');
+  // No PR and none closed (the hold just ended; the bump bot has not run yet): unchanged.
+  const unheld = [issueFor(11, required('2.13.4'), 'held')];
+  const gh6 = fakeGitHub(unheld, []);
+  await syncNotices({ gh: gh6, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', now: early });
+  assert.equal(unheld[0].state, 'open');
+  assert.equal(emails(gh6).length, 0, 'no email until the bump bot opens the PR');
   const held = [issueFor(5, required('2.13.4'), 'held')];
   const gh3 = fakeGitHub(held);
-  await syncNotices({ gh: gh3, repo: 'o/r', owner: 'flisko', mode: 'on', main: { ...main, hold: 'waiting' }, pr: null, prodUpstream: '2.13.1' });
+  await syncNotices({ gh: gh3, repo: 'o/r', owner: 'flisko', mode: 'on', main: { ...main, hold: 'waiting' }, pr: null, prodUpstream: '2.13.1', now: early });
   assert.equal(held[0].state, 'open', 'held: it stays open until the owner acts');
   const waiting = [issueFor(7, required('2.13.4'), 'image')];
-  await syncNotices({ gh: fakeGitHub(waiting), repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1' });
+  await syncNotices({ gh: fakeGitHub(waiting), repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', now: early });
   assert.equal(waiting[0].state, 'open', 'no PR yet because the image is missing: it stays open');
   const merged = [issueFor(8, required('2.13.4'), 'pr')];
   const gh5 = fakeGitHub(merged);
-  await syncNotices({ gh: gh5, repo: 'o/r', owner: 'flisko', mode: 'on', main: { ...main, upstream: '2.13.4', released: false }, pr: null, prodUpstream: '2.13.1' });
+  await syncNotices({ gh: gh5, repo: 'o/r', owner: 'flisko', mode: 'on', main: { ...main, upstream: '2.13.4', released: false }, pr: null, prodUpstream: '2.13.1', now: early });
   assert.equal(gh5.calls.length, 0, 'merged but not published yet: no change, no email');
   const gh4 = fakeGitHub([issueFor(6, required('2.13.4'), 'pr')]);
-  await syncNotices({ gh: gh4, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', onlyMerged: true });
+  await syncNotices({ gh: gh4, repo: 'o/r', owner: 'flisko', mode: 'on', main, pr: null, prodUpstream: '2.13.1', onlyMerged: true, now: early });
   assert.equal(gh4.calls.length, 0, 'the release only touches issues of merged versions');
 });

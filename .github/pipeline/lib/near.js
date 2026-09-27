@@ -11,7 +11,9 @@
 // - A mainnet release is a stable X.Y.Z tag (not a draft, not a pre-release,
 //   not an rc) whose CODE_COLOR names a *_MAINNET color. A header that names
 //   only *_TESTNET colors is never used. A stable tag without a readable
-//   header is treated as a normal mainnet release, and the owner is told.
+//   header may be offered, but the gate never merges it by itself (the owner
+//   decides, gate.mjs); a release without one that a bump only skips over is
+//   treated as normal, and the owner gets a "[check]" issue.
 // - Required ("mandatory"): CODE_RED_MAINNET, PROTOCOL_UPGRADE: TRUE or
 //   SECURITY_UPGRADE: TRUE. The gate merges it as soon as our checks are green
 //   (no 72 h wait) and the owner gets an issue with the deadline at once. The
@@ -23,7 +25,9 @@
 
 import { parseNearHeader, checkMandatory } from './mandatory.js';
 import { upsertIssue, closeIssue, listOpenIssues } from './issue.js';
-import { STABLE_TAG, UPSTREAM_REPO, UPSTREAM_IMAGE, bare, compareVersions, stableReleases, fmtUtc, env } from './common.js';
+import {
+  STABLE_TAG, UPSTREAM_REPO, UPSTREAM_IMAGE, BOT_BRANCH, bare, compareVersions, stableReleases, markerTarget, fmtUtc, hoursBetween, env,
+} from './common.js';
 
 const colorsOf = (h) => String(h?.CODE_COLOR || '').split(/[,\s]+/).filter(Boolean);
 const flag = (h, key) => String(h?.[key] || '').trim().toUpperCase() === 'TRUE';
@@ -128,7 +132,12 @@ export const noticeData = (body) => { try { return JSON.parse(NOTICE.exec(body |
 //   pr       the bump PR is open (checks running, waiting or failing)
 //   image    required, but nearcore's Docker image is not published yet (no PR yet)
 //   held     the package is held: nothing ships until the owner removes the hold
+//   skipped  the owner closed the bump PR without merging, and production does
+//            not have the release (the bump bot skips that version)
 //   staging  published to staging: promote it in editstore
+// A "[check]" issue is about releases the bump covers but does not offer
+// (their header could not be read); an unreadable header on the offered
+// version itself stops the gate, which opens its own issue.
 export function noticeText(d, { phase, repo, mode, holdReason = null, pr = null, stagingVersion = null, now = new Date() }) {
   const server = env('GITHUB_SERVER_URL', 'https://github.com');
   const prUrl = pr ? `${server}/${repo}/pull/${pr}` : null;
@@ -136,13 +145,13 @@ export function noticeText(d, { phase, repo, mode, holdReason = null, pr = null,
   const list = (d.items || []).map((c) => `- [nearcore ${c.tag}](${c.url}): ${c.header || 'no readable header'}${c.mandatory ? ` → **required** (${c.reasons.join(', ')})` : ''}`).join('\n');
   const marker = `<!-- avado-near:notice ${JSON.stringify(d)} -->`;
   if (d.kind === 'header') {
-    const title = `[check] nearcore ${d.target}: the release header could not be read`;
+    const title = `[check] nearcore ${d.target}: a release it includes has no readable header`;
     const body = `${marker}
-**What happened:** the bump bot offers nearcore ${d.target} (${prUrl ? `PR ${prUrl}` : 'no PR yet'}), but ${d.why || 'its release header could not be read'}. The header is how the pipeline tells a required release (CODE_RED, protocol or security upgrade) from a normal one.
+**What happened:** the bump bot offers nearcore ${d.target} (${prUrl ? `PR ${prUrl}` : 'no PR yet'}). It also includes older releases, and for ${d.why || 'one of them the release header could not be read'}. The header is how the pipeline tells a required release (CODE_RED, protocol or security upgrade) from a normal one.
 
-**What the pipeline does:** it treats nearcore ${d.target} as a normal mainnet release: it merges ${shadow ? '(only when PIPELINE_MODE is "on") ' : ''}72 hours after the release when our checks are green, and publishes it to staging. Production stays your click in editstore.
+**What the pipeline does:** it goes by the headers it can read (nearcore ${d.target}'s own is readable): ${d.mandatory?.length ? 'the update is required anyway and goes the fast way' : `a normal release, merged ${shadow ? '(only when PIPELINE_MODE is "on") ' : ''}72 hours after nearcore ${d.target} was published when our checks are green`}, then published to staging. Production stays your click in editstore. If the release it cannot read was required, that is missed.
 
-**What to do:** read the release notes: https://github.com/${UPSTREAM_REPO}/releases/tag/${d.target}. If NEAR says it is urgent, merge ${prUrl || 'the bump PR'} yourself with **"Create a merge commit"** as soon as \`avado/checks\` is green, then promote it in editstore. If NEAR changed its header format for good, the reader is .github/pipeline/lib/near.js and lib/mandatory.js (a copy of the release watcher's rules: fix it there first).
+**What to do:** read the release notes of the releases named above (https://github.com/${UPSTREAM_REPO}/releases). If NEAR says one of them is urgent, merge ${prUrl || 'the bump PR'} yourself with **"Create a merge commit"** as soon as \`avado/checks\` is green, then promote it in editstore. If NEAR changed its header format for good, the reader is .github/pipeline/lib/near.js and lib/mandatory.js (a copy of the release watcher's rules: fix it there first).
 
 ${list}
 
@@ -161,6 +170,7 @@ This issue closes by itself when the PR is merged and published, or closed.`;
 3. **You:** promote it to production in editstore **before the deadline**.`,
     held: `**NEAR is held** (\`hold\` file: "${holdReason || 'held'}"): the bump bot opens no PR and nothing is released while the hold exists. To ship this required release, remove the \`hold\` file in a PR and merge it (or ship it by hand), then promote it in editstore before the deadline.`,
     staging: `**nearcore ${d.target} is on the staging store** as nearbp ${stagingVersion || d.packageVersion || ''}. **Promote it to production in editstore before the deadline.** If you can, first update an installed NEAR app on the test box and check that it keeps syncing.`,
+    skipped: `**The bump PR ${prUrl || ''} was closed without merging**, so the bump bot skips nearcore ${d.target} and waits for a newer release. **Production still does not have this required release.** Reopen ${prUrl || 'the PR'} (the checks run again, and ${shadow ? 'you merge it when they are green' : 'the gate merges it when they are green'}), or ship nearcore ${d.target} by hand (README, "Update nearcore by hand"), then promote it in editstore **before the deadline**. If NEAR publishes a newer release first, the bot offers that one instead (it includes this one).`,
   }[phase];
   const body = `${marker}
 **nearcore ${d.target} is a required upgrade for NEAR validators** (${d.mandatory.map((c) => `${c.tag}: ${c.reasons.join(', ')}`).join('; ')}).
@@ -183,21 +193,54 @@ This issue updates itself and closes by itself when production runs nearcore ${d
   return { title, body };
 }
 
-// Opens or updates the issue for a bump target (called by bump.mjs).
+// How close a required release's deadline is: '' (more than 48 h left, or no
+// date), '48h', '12h' or 'passed'. Each step is one reminder email.
+export function deadlineStage(deadline, now = new Date()) {
+  if (!deadline) return '';
+  const h = hoursBetween(now, deadline);
+  if (h < 0) return 'passed';
+  if (h <= 12) return '12h';
+  if (h <= 48) return '48h';
+  return '';
+}
+
+// Opens or updates the issue for a bump target (bump.mjs, syncNotices). The
+// issue's state is the phase, plus the deadline stage for a required release,
+// so the owner gets one email per phase and a reminder 48 h and 12 h before
+// the deadline and when it passes, while production does not have it.
 export async function upsertNotice(gh, repo, d, opts) {
-  const { title, body } = noticeText(d, opts);
+  const now = opts.now || new Date();
+  const { title, body } = noticeText(d, { ...opts, now });
+  const stage = d.kind === 'mandatory' ? deadlineStage(d.deadline, now) : '';
+  const prRef = opts.pr ? `PR #${opts.pr}` : 'the bump PR';
+  const shadow = opts.mode !== 'on';
+  const phaseNote = {
+    pr: `nearcore ${d.target}: the bump PR is open${opts.pr ? ` (#${opts.pr})` : ''}. The description above is up to date.`,
+    image: `nearcore ${d.target} is required, but its Docker image is not published yet.`,
+    held: `nearcore ${d.target} is required, but NEAR is HELD: nothing ships until you remove the hold.`,
+    staging: `nearcore ${d.target} is on STAGING now. Promote it to production in editstore before ${d.deadline ? fmtUtc(d.deadline) : 'the deadline'}.`,
+    skipped: `${prRef} for the REQUIRED nearcore ${d.target} was closed without merging, and production does not have it: reopen ${prRef} or ship it by hand before ${d.deadline ? fmtUtc(d.deadline) : 'the deadline'}.`,
+  }[opts.phase];
+  const todo = {
+    pr: shadow ? `Merge ${prRef} yourself ("Create a merge commit") once avado/checks is green, then promote it in editstore.` : `${prRef} is not merged yet: see the gate's comment on it (fix what it says, or ship by hand), then promote it in editstore.`,
+    image: `Its Docker image is still not on Docker Hub, so nothing can be built yet; check NEAR's announcements.`,
+    held: 'NEAR is held: remove the hold file (or ship it by hand), then promote it in editstore.',
+    staging: 'It is on staging: promote it to production in editstore now.',
+    skipped: `Its PR was closed without merging: reopen ${prRef} or ship it by hand, then promote it in editstore.`,
+  }[opts.phase];
+  const when = d.deadline ? fmtUtc(d.deadline) : '';
+  const reminder = {
+    '48h': `**Reminder: less than 48 hours** until the deadline for nearcore ${d.target} (${when}), and production does not run it. ${todo}`,
+    '12h': `**Reminder: less than 12 hours** until the deadline for nearcore ${d.target} (${when}), and production does not run it. ${todo}`,
+    passed: `**The deadline for nearcore ${d.target} has PASSED** (${when}) and production does not run it: NEAR validators on AVADO may already be affected. ${todo}`,
+  }[stage];
   return upsertIssue(gh, repo, {
     key: `${d.kind}-${d.target}`,
     title,
     body,
     assignee: opts.owner,
-    state: `${opts.phase}@${d.target}`,
-    changeNote: {
-      pr: `nearcore ${d.target}: the bump PR is open${opts.pr ? ` (#${opts.pr})` : ''}. The description above is up to date.`,
-      image: `nearcore ${d.target} is required, but its Docker image is not published yet.`,
-      held: `nearcore ${d.target} is required, but NEAR is HELD: nothing ships until you remove the hold.`,
-      staging: `nearcore ${d.target} is on STAGING now. Promote it to production in editstore before ${d.deadline ? fmtUtc(d.deadline) : 'the deadline'}.`,
-    }[opts.phase],
+    state: `${opts.phase}${stage ? `-${stage}` : ''}@${d.target}`,
+    changeNote: reminder || phaseNote,
   });
 }
 
@@ -210,6 +253,12 @@ export async function upsertNotice(gh, repo, d, opts) {
 //   onlyMerged: look only at issues whose version is on the default branch
 //               (release.mjs, which does not know the bump PR)
 export async function syncNotices({ gh, repo, owner, mode, main, pr, prodUpstream, now = new Date(), say = () => {}, onlyMerged = false }) {
+  // The bump PRs closed without merging (the bump bot skips their version).
+  let closed = null;
+  const closedPrFor = async (target) => {
+    if (!closed) closed = (await gh.get(`repos/${repo}/pulls?state=closed&head=${repo.split('/')[0]}:${encodeURIComponent(BOT_BRANCH)}&per_page=50`)) || [];
+    return closed.find((p) => !p.merged_at && markerTarget(p.body) === target) || null;
+  };
   for (const issue of await listOpenIssues(gh, repo)) {
     const m = /^(mandatory|header)-(\d+\.\d+\.\d+)$/.exec(issue.key || '');
     if (!m) continue;
@@ -243,12 +292,23 @@ export async function syncNotices({ gh, repo, owner, mode, main, pr, prodUpstrea
       continue;
     }
     // Required, but the image was not on Docker Hub yet: the bump bot opens the PR later.
-    if (!pr && /<!-- avado-pipeline:state image@/.test(issue.body || '')) continue;
+    if (!pr && /<!-- avado-pipeline:state image[-@]/.test(issue.body || '')) continue;
     if (main.hold && m[1] === 'mandatory') {
       await upsertNotice(gh, repo, d, { phase: 'held', repo, mode, owner, holdReason: main.hold, pr: null, now });
       continue;
     }
-    await close(`There is no open bump PR for nearcore ${target} any more (closed without merging: the version is skipped; reopen the PR to undo).`);
+    // No PR for this version. Closed without merging: the version is skipped.
+    // Otherwise there is none yet (for example the hold just ended): the bump
+    // bot opens it on its next run.
+    const skipped = await closedPrFor(target);
+    if (!skipped) continue;
+    if (m[1] === 'mandatory') {
+      // A required release stays on the owner's list until production has it.
+      await upsertNotice(gh, repo, d, { phase: 'skipped', repo, mode, owner, pr: skipped.number, now });
+      say(`- issue #${issue.number} (required ${target}): PR #${skipped.number} was closed without merging; production does not have it`);
+      continue;
+    }
+    await close(`PR #${skipped.number} was closed without merging: nearcore ${target} is skipped (reopen the PR to undo).`);
   }
 }
 

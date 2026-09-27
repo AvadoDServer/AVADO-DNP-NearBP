@@ -10,7 +10,10 @@
 //      avado-build-nearbp-<content id> (scripts/ci/content-id.sh: every file
 //      except a releases.json record, so a merge commit, a squash and a re-run
 //      all find it), made by a PR-checks run of this repo for the commit it
-//      names; its manifest is read back from AVADO's IPFS node and must equal
+//      names (a run started by hand counts only when it was started on the
+//      default branch: another branch's copy of the checks may differ,
+//      lib/common.js checksRunProblem); its manifest is read back from
+//      AVADO's IPFS node and must equal
 //      the default branch's manifest, and its image must be on the node. There
 //      is NO fallback build: without a tested build nothing is published and
 //      the run fails, so the owner gets an issue that says how to get one
@@ -42,8 +45,8 @@ import { fileURLToPath } from 'node:url';
 import { makeClient } from './lib/gh.js';
 import { syncNotices } from './lib/near.js';
 import {
-  BOT_NAME, BOT_EMAIL, PR_CHECKS_PATH, ARTIFACT_ID, MANIFEST, compareVersions, maxVersion, readPackage, git, fetchBranch, pushHead,
-  releasedVersions, readProduction, holdReason, contentId, ensureCommit, retry, env, notice, warning, recordFailure,
+  BOT_NAME, BOT_EMAIL, ARTIFACT_ID, MANIFEST, compareVersions, maxVersion, readPackage, git, fetchBranch, pushHead,
+  releasedVersions, readProduction, holdReason, contentId, ensureCommit, checksRunProblem, retry, env, notice, warning, recordFailure,
 } from './lib/common.js';
 
 export const AVADO_IPFS_API = 'http://80.208.229.228:35001';
@@ -102,12 +105,11 @@ async function rpc(url, headers, method, params, { strict }) {
 // Returns { record, from } (local: true when it was added to a throwaway IPFS
 // node) or { reject: why }. Throws when something could not be READ (after
 // retries), so a network hiccup never turns into "use another build".
-async function checkCandidate(gh, a, cid, manifest) {
+async function checkCandidate(gh, a, cid, manifest, base) {
   const from = runLink(a.workflow_run.id);
   const run = await retry('reading the PR-checks run', () => gh.get(`repos/${repo}/actions/runs/${a.workflow_run.id}`));
-  if (run.path !== PR_CHECKS_PATH) return { reject: `${from} is not a PR-checks run (${run.path})` };
-  if (!run.head_repository || run.head_repository.id !== run.repository?.id) return { reject: `${from} ran for a fork` };
-  if (!['pull_request', 'workflow_dispatch'].includes(run.event)) return { reject: `${from} was started by ${run.event}` };
+  const problem = checksRunProblem(run, base);
+  if (problem) return { reject: `${from} does not count: ${problem}` };
 
   // A fresh folder for every attempt: a half-finished download must not get in the way.
   const dir = await retry('downloading the tested build record', async () => {
@@ -148,7 +150,7 @@ async function checkCandidate(gh, a, cid, manifest) {
 
 // The build the PR checks tested for exactly these files. Oldest first, so a
 // re-run after a partial release picks the same build (the same hash).
-async function testedBuild(gh, cid, manifest) {
+async function testedBuild(gh, cid, manifest, base) {
   const name = `avado-build-${ARTIFACT_ID}-${cid}`;
   const list = await retry('listing the tested builds', () => gh.get(`repos/${repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`));
   const candidates = (list?.artifacts || [])
@@ -158,7 +160,7 @@ async function testedBuild(gh, cid, manifest) {
   const rejects = [];
   let local = null;
   for (const a of candidates) {
-    const r = await checkCandidate(gh, a, cid, manifest);
+    const r = await checkCandidate(gh, a, cid, manifest, base);
     if (r.record && !r.local) return r;
     if (r.local) { local = local || r; continue; }
     rejects.push(r.reject);
@@ -235,7 +237,7 @@ async function main() {
 
   // Find the tested build BEFORE publishing anything: a read error stops the
   // run here, with nothing published.
-  const b = await testedBuild(gh, cid, manifest);
+  const b = await testedBuild(gh, cid, manifest, base);
   if (!b.record || (b.local && !dryRun)) {
     throw new Error(`NOT published (nothing untested is ever published):
 - ${name} ${version}: ${b.missing || b.why}
