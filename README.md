@@ -17,7 +17,7 @@ it on NEAR mainnet, and a tested update goes to the staging store by itself.
 Required updates go fast and you get an email with the deadline at once.
 Customers only get it when you publish it to production in editstore, as
 before.** Until you set `PIPELINE_MODE` to `on`, the robot only prepares and
-comments; it never merges (see "Modes").
+comments; it never merges (see "Modes", and "Before you switch it on").
 
 NEAR has no DAppNode package, so there is no DAppNode test to wait for: our
 checks are the only test, and a normal release waits 72 hours instead.
@@ -40,7 +40,8 @@ checks are the only test, and a normal release waits 72 hours instead.
    | `PROTOCOL_UPGRADE: TRUE` | new protocol version; validators on the old version drop out after the vote | **required**: fast track, email at once (deadline: the voting date in the notes) |
    | `PROTOCOL_UPGRADE` or `DATABASE_UPGRADE: TRUE` | the database may migrate on first start | PR and email say it is **one-way** (see below) |
    | anything else (`CODE_GREEN`, `CODE_YELLOW` without an upgrade flag) | normal release | merges 72 h after nearcore published it |
-   | no readable header | unknown | treated as normal; you get a "[check]" email |
+   | no readable header on the version offered | unknown: maybe testnet only, maybe required | **never merged by the robot**: you get an email and decide |
+   | no readable header on an older release the update includes | unknown | treated as normal; you get a "[check]" email |
 2. **Checks** (`pr-checks.yml`, status `avado/checks`), on free GitHub machines:
    - the nearcore image digest is still what Docker Hub serves for that version;
    - the package name, volume, port and settings names are the same as on
@@ -61,8 +62,10 @@ checks are the only test, and a normal release waits 72 hours instead.
      header-syncs until it is within 2 epochs of the chain head (like a synced
      box) and is stopped like a box does it; the new build starts on the same
      volume. It must keep `validator_key.json` and `node_key.json` byte for
-     byte, not initialise the node again, open the existing database and go
-     on syncing from where production stopped, without a new epoch sync.
+     byte, **run as the validator** (its RPC names the account and public key
+     of `validator_key.json`), not initialise the node again, open the
+     existing database and go on syncing from where production stopped,
+     without a new epoch sync.
      (nearcore itself deletes `data/` and syncs again when it starts more than
      2 epochs behind the head; a box that is in sync never is.)
    A fresh NEAR node asks one peer at a time for its first proof and busy
@@ -78,12 +81,15 @@ checks are the only test, and a normal release waits 72 hours instead.
    - any other release: **72 hours** after nearcore published it.
 
    It does **not** merge when our checks fail, when the version is not a
-   mainnet release, when anything is unclear, or when a person pushed changes
-   to the checks or the pipeline onto the robot's branch (those are yours to
-   review and merge). Then it opens an issue for you (see "What the emails
-   mean"). The gate writes its reasoning in a comment on the PR, updated on
-   every run. It also starts the release when a version on `main` never got a
-   release run.
+   mainnet release or its release header cannot be read, when nearcore would
+   go down, when anything is unclear, or when a person pushed changes to the
+   checks or the pipeline onto the robot's branch (those are yours to review
+   and merge). Then it opens an issue for you (see "What the emails mean").
+   A conflict on a branch only the robot wrote waits: the robot rebuilds it.
+   It only counts check runs of this repo, and a check run started by hand
+   only when it was started on `main`. The gate writes its reasoning in a
+   comment on the PR, updated on every run. It also starts the release when a
+   version on `main` never got a release run.
 4. **Release** (`release.yml`, after the merge). If the version on `main` is
    new and nothing is held, it is published to the **staging** store: **only
    the exact build the checks tested for these files** (found by a content id;
@@ -157,10 +163,19 @@ github.com/settings/notifications.
   it; the email says the deadline, whether it is a one-way database step, and
   what you must do (promote it in editstore once it is on staging; in shadow
   mode, merge the PR yourself first). You get one more email when it reaches
-  staging. It closes by itself when production runs it.
-- **"[check] nearcore <version>: the release header could not be read"**: the
-  robot cannot tell whether it is required, so it treats it as normal. Read
-  the release notes; if NEAR says it is urgent, merge the PR yourself.
+  staging, and **reminders 48 hours and 12 hours before the deadline and when
+  it passes**, as long as production does not run it. If you close its PR
+  without merging, the issue stays open and says so (reopen the PR, or ship it
+  by hand). It closes by itself when production runs it.
+- **"[needs fix] nearcore <version>: its release header could not be read, you
+  decide"**: the robot cannot tell whether the version is meant for mainnet
+  or required, so it does not merge. Read the release notes (the issue has a
+  Claude Code prompt that does it): a mainnet release you merge yourself once
+  `avado/checks` is green; anything else you close.
+- **"[check] nearcore <version>: a release it includes has no readable
+  header"**: an older release the update includes has no readable header; the
+  robot goes by the headers it can read. Read the notes; if NEAR says it is
+  urgent, merge the PR yourself.
 - **"[needs fix] nearcore <version>: our checks failed ..."**: the new nearcore
   broke something (for example a config key was removed), and the automatic
   re-runs did not help. Nothing was merged or released. The issue has the
@@ -182,11 +197,26 @@ github.com/settings/notifications.
 - A comment on one of these issues means the situation changed. A problem that
   stays the same does not send more emails.
 
-GitHub switches off scheduled workflows in a public repo after 60 days without
-commits ("disabled_inactivity"); the fix is Actions → the workflow → **Enable
-workflow**. The release watcher (`AvadoDServer/avado-release-control`) warns
-about it once `bump.yml` and `gate.yml` are listed for NEAR in its
-`packages.yml`.
+### Before you switch it on
+
+1. Keep GitHub emails on (above).
+2. **List the robots in the release watcher** (recommended): in
+   `AvadoDServer/avado-release-control`, `packages.yml`, under `id: nearbp`,
+   add
+   ```yaml
+       workflows:
+         - {file: bump.yml, every_hours: 4}
+         - {file: gate.yml, every_hours: 4}
+         - {file: release.yml}
+   ```
+   The watcher already emails you ("workflows:stopped") when GitHub switches
+   off any workflow of this repo for inactivity: GitHub does that to
+   scheduled workflows in a public repo after 60 days without commits, and
+   this repo had such a gap (22 July to 21 September 2026). Listed robots are
+   also reported when they were switched off by hand, keep failing, or had
+   no successful run for 12 hours. The fix for a switched-off robot is
+   Actions → the workflow → **Enable workflow**.
+3. Then set `PIPELINE_MODE` to `on`.
 
 ### Secrets
 
