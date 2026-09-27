@@ -184,6 +184,9 @@ test('checks that failed on an outside step run once more, without an issue', ()
 
 test('the issue shows the failing lines of a job log, not setup or cleanup noise', () => {
   const log = [
+    '2026-09-26T22:10:18.1Z ##[group]Run node --test ".github/pipeline/test/*.test.mjs"',
+    '2026-09-26T22:10:18.2Z ok 23 - the "[required]" issue closes when a newer bump replaces it',
+    '2026-09-26T22:10:18.3Z # pass 23',
     '2026-09-26T22:10:19.1Z ##[group]Run scripts/ci/check-config.sh',
     '2026-09-26T22:10:19.2Z   PASS  validate-config        neard validate-config accepts our config.json',
     '2026-09-26T22:10:19.4Z   FAIL  unknown-keys           neard does not know these config.json keys (it ignores them): store.state_snapshot_config',
@@ -196,6 +199,7 @@ test('the issue shows the failing lines of a job log, not setup or cleanup noise
   assert.match(x, /FAIL {2}unknown-keys/);
   assert.match(x, /##\[error\]/);
   assert.doesNotMatch(x, /Post job|\[command\]|\x1b|shell: /);
+  assert.doesNotMatch(x, /# pass 23|ok 23/, 'only the failing step, not the unit tests before it');
 });
 
 // --- files the bump writes --------------------------------------------------------------------

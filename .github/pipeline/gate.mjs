@@ -133,7 +133,13 @@ export function logExcerpt(log) {
     .split('\n')
     .map((l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, '').replace(/\x1b\[[0-9;]*m/g, '').replace(/\r$/, ''));
   const firstError = lines.findIndex((l) => l.startsWith('##[error]'));
-  const upto = firstError === -1 ? lines : lines.slice(0, firstError + 1);
+  // Only the failing step: from its "##[group]Run ..." line to the first error
+  // (the earlier steps' output, such as the unit tests, is not the problem).
+  let from = 0;
+  if (firstError !== -1) {
+    for (let i = firstError; i >= 0; i--) if (lines[i].startsWith('##[group]Run ')) { from = i; break; }
+  }
+  const upto = firstError === -1 ? lines : lines.slice(from, firstError + 1);
   const noise = /^(##\[(group|endgroup)\]|shell: |env:$|\s+[A-Z_]+: |\[command\]|Post job cleanup|Cleaning up orphan)/;
   const useful = upto.filter((l) => l.trim() && !noise.test(l));
   const key = useful.filter((l) => /(^|\s)FAIL\b|FAIL:|MISSING|UNKNOWN|^##\[error\]|^-{5} |^ {4}[-+]|\bError: |rc=[1-9]/.test(l)).slice(0, 30);
@@ -189,11 +195,11 @@ function issueText({ repo, pr, target, mainNear, decision, checks, failed, runUr
     ? `nearcore ${summary.mandatory.map((c) => c.tag).join(', ')} is REQUIRED (${summary.mandatory.map((c) => c.reasons.join(', ')).join('; ')}); deadline ${deadlineText(summary.deadline, now)}`
     : null;
   const headline = {
-    'checks-failed': `our checks failed for nearcore ${target}`,
-    'owner-merge': `a person changed the checks or the pipeline on the nearcore ${target} PR: please review and merge`,
-    conflict: `the nearcore ${target} PR conflicts with main`,
+    'checks-failed': 'our checks failed',
+    'owner-merge': 'a person changed the checks or the pipeline on the PR: please review and merge',
+    conflict: 'the PR conflicts with main',
     'unexpected-files': 'the bump PR changes unexpected files',
-    unclear: `the gate could not decide on nearcore ${target}`,
+    unclear: 'the gate could not decide',
   }[decision.cause] || decision.why;
   const title = `[needs fix] nearcore ${target}${required ? ' (REQUIRED)' : ''}: ${headline}`;
 
