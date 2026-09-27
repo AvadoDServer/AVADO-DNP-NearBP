@@ -1,0 +1,6 @@
+{
+  "name": "avado-nearbp-pipeline",
+  "private": true,
+  "description": "Bump, gate and release scripts for the NEAR package (no dependencies). Tests: node --test \".github/pipeline/test/*.test.mjs\"",
+  "type": "module"
+}
