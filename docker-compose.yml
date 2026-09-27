@@ -2,8 +2,8 @@ version: '3.4'
 services:
   nearbp.avado.dnp.dappnode.eth:
     build: ./build
-    image: 'nearbp.avado.dnp.dappnode.eth:0.0.75'
-    restart: always
+    image: 'nearbp.avado.dnp.dappnode.eth:0.0.76'
+    restart: unless-stopped
     privileged: true
     volumes:
       - 'data:/root/.near'
