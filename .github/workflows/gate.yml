@@ -1,0 +1,63 @@
+name: Gate
+# Every 4 hours and whenever the PR checks finish: merges the bump bot's PR
+# (merge commit) when "avado/checks" is green, the branch contains the default
+# branch and the package is not held, and
+#   - at once for a REQUIRED nearcore release (CODE_RED_MAINNET,
+#     PROTOCOL_UPGRADE: TRUE or SECURITY_UPGRADE: TRUE in the release header),
+#   - 72 h after nearcore published it for any other release.
+# NEAR has no DAppNode package: our checks are the only test. Otherwise it
+# waits, or stops and opens an issue for the owner. It also moves the
+# "[required]" issues along (merged, on staging, closed when production has
+# it) and starts release.yml when a version on the default branch never got a
+# release run. Details: .github/pipeline/gate.mjs. It never runs code from a
+# pull request: it runs the default branch's code and reads the GitHub API.
+# Repository variable PIPELINE_MODE: not set or "shadow" = decide and comment,
+# never merge (the default); "on" = merge; "off" = do nothing.
+on:
+  schedule:
+    - cron: '53 */4 * * *'
+  workflow_run: # PR checks started by a person or PAT_TOKEN
+    workflows: ['PR checks']
+    types: [completed]
+  workflow_dispatch: # PR checks started by the bump bot without PAT_TOKEN start the gate themselves
+
+permissions:
+  contents: write # merge
+  pull-requests: write
+  issues: write
+  statuses: write # avado/gate
+  actions: write # re-runs checks that failed on an outside cause; starts release.yml after the merge (a GITHUB_TOKEN merge does not)
+
+concurrency:
+  group: gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: vars.PIPELINE_MODE != 'off'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # "Release ..." commits tell which versions are released
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Gate
+        run: node .github/pipeline/gate.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PIPELINE_MODE: ${{ vars.PIPELINE_MODE }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+      - name: Tell the owner if this workflow broke
+        if: failure()
+        run: node .github/pipeline/report.mjs failure "Gate"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+      - if: success()
+        run: node .github/pipeline/report.mjs success "Gate"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

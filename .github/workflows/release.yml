@@ -1,13 +1,71 @@
 name: Release
+# Publishes the package to the STAGING store when its version is new on the
+# default branch (replaces AvadoDServer/ci-release-action for this repo): ONLY
+# the exact build the PR checks tested for these files (never a new build),
+# then store.setPackageHash, an empty commit "Release <name> <version>" with
+# "Manifest hash: <hash>" (as ci-release-action wrote it), and one
+# store.releaseStore, with the RPC_TOKEN secret, like ci-release-action.
+# A held package (a `hold` file) is never published. No new version: nothing
+# is published. No RPC_TOKEN: a dry run. No tested build: nothing is
+# published, and the owner gets an issue. Production stays the owner's click
+# in editstore. Details: .github/pipeline/release.mjs.
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: [main, master]
+  workflow_dispatch: # the gate starts it after merging; the owner after "PR checks" with pr = main
+    inputs:
+      dry_run:
+        description: 'Only show what would be published'
+        type: boolean
+        default: false
+      release_store:
+        description: 'Also ask the store to rebuild staging when nothing is new (after a failed store.releaseStore)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # the "Release <name> <version>" commit
+  actions: read # the tested build's record
+  issues: write # reports a failure of this workflow; moves the "[required]" issue to "on staging"
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Where the PR checks added the builds (the same expression as pr-checks.yml).
+  IPFS_API: ${{ vars.IPFS_PROVIDER == 'local' && 'http://127.0.0.1:5001' || vars.IPFS_PROVIDER || 'http://80.208.229.228:35001' }}
+
 jobs:
   release:
-    runs-on: ubuntu-22.04
+    # Only the default branch is ever released (a run started on another branch does nothing).
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: AvadoDServer/ci-release-action@main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          rpcToken: ${{ secrets.RPC_TOKEN }}
+          fetch-depth: 0 # "Release ..." commits tell which versions are published
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Release
+        run: node .github/pipeline/release.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RPC_TOKEN: ${{ secrets.RPC_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_STORE: ${{ inputs.release_store }}
+          PIPELINE_MODE: ${{ vars.PIPELINE_MODE }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+      - name: Tell the owner if this workflow broke
+        if: failure()
+        run: node .github/pipeline/report.mjs failure "Release"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+      - if: success()
+        run: node .github/pipeline/report.mjs success "Release"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

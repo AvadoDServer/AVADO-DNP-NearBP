@@ -1,0 +1,68 @@
+name: Bump nearcore
+# Every 4 hours: if nearcore published a newer MAINNET release (stable X.Y.Z
+# tag whose header says *_MAINNET; never an rc or a testnet release) and its
+# image is on Docker Hub, open or update ONE pull request on branch
+# avado-bot/bump that moves NEAR to it (build/Dockerfile FROM <version>@<digest>,
+# the manifest's upstream and version + 1 patch, the compose image tag). A
+# required release (CODE_RED_MAINNET, PROTOCOL_UPGRADE, SECURITY_UPGRADE) also
+# opens an issue for the owner at once, with the deadline. A version whose PR
+# the owner closed is skipped. Details: .github/pipeline/bump.mjs.
+# Runs unless the repository variable PIPELINE_MODE is off (it only opens PRs;
+# the gate decides about merging).
+on:
+  schedule:
+    - cron: '23 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'TEST ONLY: pretend this nearcore version is the newest mainnet release (leave empty for a normal run)'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Only print what would happen'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # starts pr-checks.yml when there is no PAT_TOKEN
+  issues: write # the owner's issues: required releases, failures of this workflow
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: vars.PIPELINE_MODE != 'off'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Bump
+        run: node .github/pipeline/bump.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Pushes and PRs made with a personal token start the PR checks; see README.
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+          PIPELINE_MODE: ${{ vars.PIPELINE_MODE }}
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+      - name: Tell the owner if this workflow broke
+        if: failure()
+        run: node .github/pipeline/report.mjs failure "Bump nearcore"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PIPELINE_OWNER: ${{ vars.PIPELINE_OWNER }}
+      - if: success()
+        run: node .github/pipeline/report.mjs success "Bump nearcore"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
