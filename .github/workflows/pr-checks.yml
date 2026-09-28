@@ -1,0 +1,380 @@
+name: PR checks
+# Our own checks for every pull request, on free GitHub-hosted runners (NEAR
+# has no DAppNode package, so these checks are the only test). The result is
+# ONE commit status on the PR head: "avado/checks". The gate (gate.yml)
+# merges the bump bot's PR only when it is green.
+#
+#   plan      unit tests of the pipeline rules; the nearcore image digest is
+#             what Docker Hub serves; name, volume, port and env keys are
+#             unchanged against the base branch and production, the version
+#             goes up, and the manifest, Dockerfile and compose agree    scripts/ci/check-identity.sh
+#   build     AVADOSDK build (the files are added to the IPFS node, like
+#             ci-build-action did), then on the image loaded back from the
+#             uploaded file:
+#               the neard inside is exactly the manifest's "upstream"     scripts/ci/check-version.sh
+#               neard accepts every config.json key and every flag the
+#               entrypoint passes                                         scripts/ci/check-config.sh
+#   boot      the uploaded image boots on NEAR mainnet like a new install:
+#             epoch sync proof accepted, peers, header sync moving, RPC,
+#             p2p port published, clean stop                           scripts/ci/boot-test.sh
+#   upgrade   a box upgrades in place: the production image runs on a
+#             volume (with a validator key) until it is within 2 epochs of
+#             the head like a synced box, then this build starts on the
+#             same volume: keys byte for byte and loaded (the RPC names the
+#             validator), database kept, sync goes on without a new epoch
+#             sync or data reset                                        scripts/ci/upgrade-test.sh
+# boot and upgrade run side by side (a fresh NEAR node can wait long for an
+# epoch sync proof). A boot or upgrade test that fails only on the public
+# network is tried once more on the spot.
+# When every job passed, the tested build's record is kept as artifact
+# avado-build-nearbp-<content id> (scripts/ci/content-id.sh), and only then
+# does avado/checks turn green; release.yml publishes exactly that build after
+# the merge, and nothing else.
+#
+# No secrets are used. Started by hand (workflow_dispatch), input "pr" is a PR
+# number of THIS repo (the bump bot uses this when it has no PAT_TOKEN), or
+# "main" to check the default branch as it is (when Release says there is no
+# tested build). PRs from forks are only checked by their own pull_request run,
+# whose builds go to a throwaway IPFS node and can never be released.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request number of this repo to check, or "main" to check the default branch as it is'
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read # look up the PR (workflow_dispatch)
+  statuses: write
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  # IPFS API the AVADOSDK adds the build to. Repository variable IPFS_PROVIDER:
+  # empty = AVADO's node (as ci-build-action), "local" = a throwaway kubo on
+  # the runner (for test copies of this repo; such builds cannot be released).
+  # Pull requests from forks always use the throwaway node: release.yml never
+  # uses their builds, so nothing is added to AVADO's node for them.
+  IPFS_API: ${{ (vars.IPFS_PROVIDER == 'local' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 'http://127.0.0.1:5001' || vars.IPFS_PROVIDER || 'http://80.208.229.228:35001' }}
+  KUBO_IMAGE: ipfs/kubo:v0.25.0@sha256:9d917826eb669276040efb39cf6c68ae7463356a8e216eb13b278de00aa126be
+
+jobs:
+  plan:
+    name: Plan (unit tests, digest, identity)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - id: pr
+        name: Pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_PR: ${{ inputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -n "$EVENT_SHA" ]; then
+            sha=$EVENT_SHA base=$EVENT_BASE
+          elif [ "$INPUT_PR" = main ] || [ "$INPUT_PR" = "$DEFAULT_BRANCH" ]; then
+            # The default branch as it is: compared with its previous commit.
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$DEFAULT_BRANCH" --jq .sha)
+            base=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha" --jq '.parents[0].sha')
+          else
+            case "$INPUT_PR" in '' | *[!0-9]*) echo "::error::input pr must be a pull request number or \"main\" (got '$INPUT_PR')"; exit 1 ;; esac
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR")
+            head_repo=$(echo "$pr" | jq -r '.head.repo.full_name // empty')
+            if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+              # A run started here has this repo's permissions; code from a fork
+              # must never run with them (its own pull_request run checks it).
+              echo "::error::PR #$INPUT_PR comes from ${head_repo:-a deleted fork}, not from $GITHUB_REPOSITORY. PRs from forks are checked only by their own pull_request run; push the branch to this repo to check it here."
+              exit 1
+            fi
+            sha=$(echo "$pr" | jq -r .head.sha)
+            base=$(echo "$pr" | jq -r .base.sha)
+          fi
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          echo "Checking $sha against base $base"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+          fetch-depth: 0 # the identity check reads the base commit and the release history
+          persist-credentials: false
+      - name: Status avado/checks = pending
+        continue-on-error: true # read-only token on pull requests from forks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/${{ steps.pr.outputs.sha }}" -f state=pending -f context=avado/checks \
+            -f description="Checks running" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Unit tests of the pipeline rules
+        run: node --test ".github/pipeline/test/*.test.mjs"
+      - name: nearcore image digest (Docker Hub)
+        run: scripts/ci/check-digest.sh
+      - name: Identity (name, volume, port, env keys, versions)
+        run: scripts/ci/check-identity.sh "${{ steps.pr.outputs.base }}" "$RUNNER_TEMP/identity"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checks-plan
+          path: ${{ runner.temp }}/identity/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  build:
+    name: Build (AVADOSDK, version, config and flags)
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # This job runs the pull request's own scripts: it gets no write access.
+    permissions:
+      contents: read
+    outputs:
+      content: ${{ steps.build.outputs.content }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Throwaway IPFS node (test copies and pull requests from forks)
+        if: env.IPFS_API == 'http://127.0.0.1:5001'
+        run: |
+          docker run -d --name ipfs -p 127.0.0.1:5001:5001 "$KUBO_IMAGE" >/dev/null
+          for _ in $(seq 1 60); do curl -fsS -X POST http://127.0.0.1:5001/api/v0/version >/dev/null 2>&1 && exit 0; sleep 1; done
+          docker logs ipfs; exit 1
+      - id: build
+        name: AVADOSDK build (build, add to IPFS)
+        run: |
+          record=$(scripts/ci/sdk-build.sh "$RUNNER_TEMP/checks/build" "$IPFS_API")
+          cat "$record"
+          {
+            echo "image=$(jq -r '.name + ":" + .version' "$record")"
+            echo "upstream=$(jq -r .upstream "$record")"
+            echo "content=$(jq -r .contentId "$record")"
+          } >>"$GITHUB_OUTPUT"
+      - name: Exact nearcore version
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }} # every check runs, so one run shows every problem
+        run: scripts/ci/check-version.sh "${{ steps.build.outputs.image }}" "${{ steps.build.outputs.upstream }}"
+      - name: Every config key and neard flag is accepted
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }} # every check runs, so one run shows every problem
+        run: scripts/ci/check-config.sh "${{ steps.build.outputs.image }}" "$RUNNER_TEMP/checks/config"
+      - name: Keep the build for the test jobs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build
+          path: |
+            ${{ runner.temp }}/checks/build/record.json
+            ${{ runner.temp }}/checks/build/releases.json
+            ${{ runner.temp }}/checks/build/manifest.json
+            ${{ runner.temp }}/checks/build/image/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checks-build
+          path: |
+            ${{ runner.temp }}/checks/build/record.json
+            ${{ runner.temp }}/checks/build/sdk-build.log
+            ${{ runner.temp }}/checks/config/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  boot:
+    name: Boot on NEAR mainnet
+    needs: [plan, build]
+    # Also when the version or config check failed: one run shows every problem.
+    if: ${{ !cancelled() && needs.build.outputs.content != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Download the tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+      - name: Load the tested image
+        run: scripts/ci/load-image.sh "$RUNNER_TEMP/build/record.json" "$RUNNER_TEMP/build/image" avado-ci/candidate:latest
+      - name: Boots on NEAR mainnet
+        run: |
+          # Exit code 2: only the epoch sync, header sync or peers failed
+          # (public network, not our package): one more try on a fresh volume.
+          rc=0
+          scripts/ci/boot-test.sh avado-ci/candidate:latest dappnode_package.json "$RUNNER_TEMP/checks/boot" || rc=$?
+          if [ "$rc" = 2 ]; then
+            echo "::warning::only network-dependent boot checks failed; trying once more on a fresh volume"
+            mv "$RUNNER_TEMP/checks/boot" "$RUNNER_TEMP/checks/boot-try1"
+            rc=0
+            scripts/ci/boot-test.sh avado-ci/candidate:latest dappnode_package.json "$RUNNER_TEMP/checks/boot" || rc=$?
+          fi
+          exit "$rc"
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checks-boot
+          path: |
+            ${{ runner.temp }}/checks/boot/
+            ${{ runner.temp }}/checks/boot-try1/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  upgrade:
+    name: Upgrade in place
+    needs: [plan, build]
+    # Also when the version or config check failed: one run shows every problem.
+    if: ${{ !cancelled() && needs.build.outputs.content != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240 # epoch sync plus catching up to within 2 epochs, twice at worst
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Download the tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+      - name: Load the tested image
+        # Before the production image: `docker load` of production re-tags
+        # <name>:<version>, which is also this build's tag when the version
+        # did not change. Both are used by the tags given here.
+        run: scripts/ci/load-image.sh "$RUNNER_TEMP/build/record.json" "$RUNNER_TEMP/build/image" avado-ci/candidate:latest
+      - name: Production image (from the production store)
+        run: scripts/ci/production-image.sh "$(jq -r .name dappnode_package.json)" avado-ci/production:latest "$RUNNER_TEMP/production"
+      - name: Upgrades a box in place (production image, then this build on the same volume)
+        run: |
+          rc=0
+          scripts/ci/upgrade-test.sh avado-ci/production:latest avado-ci/candidate:latest dappnode_package.json "$RUNNER_TEMP/checks/upgrade" || rc=$?
+          if [ "$rc" = 2 ]; then
+            echo "::warning::the upgrade test failed only on network-dependent checks; trying once more"
+            mv "$RUNNER_TEMP/checks/upgrade" "$RUNNER_TEMP/checks/upgrade-try1"
+            rc=0
+            scripts/ci/upgrade-test.sh avado-ci/production:latest avado-ci/candidate:latest dappnode_package.json "$RUNNER_TEMP/checks/upgrade" || rc=$?
+          fi
+          exit "$rc"
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checks-upgrade
+          path: |
+            ${{ runner.temp }}/production/production.json
+            ${{ runner.temp }}/checks/upgrade/
+            ${{ runner.temp }}/checks/upgrade-try1/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  result:
+    name: avado/checks
+    needs: [plan, build, boot, upgrade]
+    # not on a cancelled run (a newer push replaced it): its "failure" would
+    # overwrite the newer run's "pending" on the same commit
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+      actions: write # starts the gate after a run the bump bot started
+    steps:
+      - id: verdict
+        name: Verdict of the checks
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+          BOOT: ${{ needs.boot.result }}
+          UPGRADE: ${{ needs.upgrade.result }}
+        run: |
+          if [ "$PLAN" = success ] && [ "$BUILD" = success ] && [ "$BOOT" = success ] && [ "$UPGRADE" = success ]; then
+            echo "state=success" >>"$GITHUB_OUTPUT"
+          else
+            echo "state=failure" >>"$GITHUB_OUTPUT"
+          fi
+      # The tested build's record is kept BEFORE avado/checks turns green: the
+      # gate merges on green, and release.yml publishes only a build it finds.
+      - id: download
+        name: Download the tested build's record
+        if: steps.verdict.outputs.state == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+      - id: keep
+        name: Keep the tested build's record (release.yml publishes exactly this build)
+        if: steps.verdict.outputs.state == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: avado-build-nearbp-${{ needs.build.outputs.content }}
+          path: |
+            ${{ runner.temp }}/build/record.json
+            ${{ runner.temp }}/build/releases.json
+            ${{ runner.temp }}/build/manifest.json
+          retention-days: 90
+          if-no-files-found: error
+          overwrite: true # a re-run of this job after a failed upload
+      - id: status
+        name: Status avado/checks
+        if: ${{ !cancelled() }} # also after a failed step above: the commit must not stay "pending"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.plan.outputs.sha || github.event.pull_request.head.sha }}
+          INPUT_PR: ${{ inputs.pr }}
+          VERDICT: ${{ steps.verdict.outputs.state }}
+          KEPT: ${{ steps.keep.outcome }}
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+          BOOT: ${{ needs.boot.result }}
+          UPGRADE: ${{ needs.upgrade.result }}
+        run: |
+          # Even when the plan job failed before it knew the commit, the PR gets a status.
+          case "$INPUT_PR" in '' | *[!0-9]*) ;; *) [ -n "$SHA" ] || SHA=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR" --jq .head.sha || true) ;; esac
+          if [ "$VERDICT" = success ] && [ "$KEPT" = success ]; then
+            state=success desc="All checks passed: build, version, config, boot on mainnet, upgrade in place"
+          elif [ "$VERDICT" = success ]; then
+            state=failure desc="All checks passed, but the tested build's record could not be kept (re-run this job)"
+          else
+            state=failure desc="Failed: plan $PLAN, build $BUILD, boot $BOOT, upgrade $UPGRADE (open the run for details)"
+          fi
+          echo "$state: $desc"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+          if [ -n "$SHA" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state="$state" -f context=avado/checks \
+              -f description="$desc" -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null ||
+              echo "::warning::could not set the avado/checks status (read-only token on a pull request from a fork)"
+          fi
+      - name: Start the gate
+        # A run started with the built-in token (the bump bot without PAT_TOKEN
+        # uses workflow_dispatch) does not trigger gate.yml's workflow_run.
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run gate.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" || echo "::warning::could not start the gate; it runs within 4 hours anyway"
+      - name: Result
+        if: ${{ !cancelled() }}
+        run: '[ "${{ steps.status.outputs.state }}" = success ]'
