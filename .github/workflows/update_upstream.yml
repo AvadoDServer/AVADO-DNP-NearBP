@@ -1,0 +1,46 @@
+name: Update nearcore Upstream Version
+
+on:
+  schedule:
+    # Every 6 hours: nearcore security (code red) releases should not wait a day
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+jobs:
+  update-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run update script
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/update_upstream.py
+
+      - name: Create Pull Request
+        if: env.updated == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          # PAT so the PR triggers the Build workflow (GITHUB_TOKEN PRs do not)
+          token: ${{ secrets.PAT_TOKEN }}
+          commit-message: 'chore: update nearcore to ${{ env.new_version }}'
+          title: "${{ env.urgent == 'true' && '[REQUIRED] ' || '' }}Update nearcore from ${{ env.old_version }} to ${{ env.new_version }} (${{ env.package_version }})"
+          body-path: ${{ runner.temp }}/nearcore-pr-body.md
+          branch: update-nearcore-${{ env.new_version }}
+          delete-branch: true
+          labels: |
+            automated
+            dependencies
