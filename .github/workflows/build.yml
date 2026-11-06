@@ -1,7 +1,36 @@
 name: Build
-on: pull_request
+# Builds the pull request, uploads the package to IPFS and runs the start test.
+# For an update bot's pull request the automerge job then merges and releases
+# it when the rules allow (urgent: right away, otherwise on the first bot run
+# 20 h after its last commit). Rules: AvadoDServer/ci-release-action/automerge.
+on:
+  pull_request:
+  workflow_dispatch:
+    # The update bots open pull requests with the workflow token, which starts
+    # no pull_request workflow, so they start this one by dispatch.
+    inputs:
+      pr:
+        description: 'Pull request number to build'
+        required: true
+concurrency:
+  group: build-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: false
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: AvadoDServer/ci-build-action@main
+        with:
+          pr: ${{ inputs.pr }}
+      - uses: AvadoDServer/ci-build-action/smoke@main
+  automerge:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions: { contents: write, pull-requests: write, actions: read }
+    steps:
+      - uses: AvadoDServer/ci-release-action/automerge@main
+        with:
+          rpcToken: ${{ secrets.RPC_TOKEN }}
+          pr: ${{ github.event.pull_request.number || inputs.pr }}
+          enabled: ${{ vars.AUTOMERGE }}
