@@ -8,15 +8,32 @@ on:
     # Allow manual triggering
 
 jobs:
+  # First merge and release an update whose Build passed and whose wait is
+  # over (rules: AvadoDServer/ci-release-action/automerge), then look upstream.
+  automerge:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: { contents: write, pull-requests: write, actions: read }
+    steps:
+      - uses: AvadoDServer/ci-release-action/automerge@main
+        with:
+          rpcToken: ${{ secrets.RPC_TOKEN }}
+          enabled: ${{ vars.AUTOMERGE }}
   update-upstream:
+    needs: automerge
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+      actions: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,12 +47,12 @@ jobs:
         run: |
           python .github/scripts/update_upstream.py
 
-      - name: Create Pull Request
+      - id: cpr
+        name: Create Pull Request
         if: env.updated == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           # PAT so the PR triggers the Build workflow (GITHUB_TOKEN PRs do not)
-          token: ${{ secrets.PAT_TOKEN }}
           commit-message: 'chore: update nearcore to ${{ env.new_version }}'
           title: "${{ env.urgent == 'true' && '[REQUIRED] ' || '' }}Update nearcore from ${{ env.old_version }} to ${{ env.new_version }} (${{ env.package_version }})"
           body-path: ${{ runner.temp }}/nearcore-pr-body.md
@@ -44,3 +61,12 @@ jobs:
           labels: |
             automated
             dependencies
+      # The workflow token starts no pull_request workflow: start the Build here.
+      - name: Build the pull request
+        if: steps.cpr.outputs.pull-request-operation == 'created' || steps.cpr.outputs.pull-request-operation == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          branch=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefName -q .headRefName)
+          gh workflow run build.yml -R "$GITHUB_REPOSITORY" --ref "$branch" -f pr="$PR"
